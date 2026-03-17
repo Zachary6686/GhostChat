@@ -29,7 +29,7 @@ def aead_encrypt(key: bytes, plaintext: bytes, nonce: bytes, ad: bytes = b"") ->
 
 
 def aead_decrypt(key: bytes, ciphertext: bytes, nonce: bytes, ad: bytes = b"") -> bytes:
-    """Decrypt; raises InvalidTag on auth failure."""
+    """Decrypt; raises InvalidTag on any auth failure (tag mismatch, wrong AAD, or corruption)."""
     if len(key) != 32:
         raise ValueError("key must be 32 bytes")
     if len(nonce) != NONCE_LENGTH:

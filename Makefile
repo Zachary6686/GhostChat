@@ -4,7 +4,11 @@
 PYTHON ?= python
 PYTEST = $(PYTHON) -m pytest
 
-.PHONY: test server client validate
+.PHONY: test server client validate clean
+
+# Remove pytest and Python cache (pytest cache disabled via pyproject.toml)
+clean:
+	rm -rf .pytest_cache pytest-cache-files-* ; find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
 # Run full test suite
 test:

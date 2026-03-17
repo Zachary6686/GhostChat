@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
 from nacl.public import Box, PrivateKey as X25519PrivateKey, PublicKey as X25519PublicKey
+from nacl.signing import VerifyKey
 
 from crypto.hkdf import hkdf_derive
 from crypto.identity import IdentityKeyPair
@@ -67,8 +68,8 @@ def _verify_spk_signature(identity_pub: bytes, spk_pub: bytes, spk_sig: bytes) -
     if len(identity_pub) != KEY_LEN or len(spk_pub) != KEY_LEN or len(spk_sig) != ED25519_SIG_LEN:
         raise SignedPreKeyVerificationError("SPK or identity key or signature length invalid")
     try:
-        key = IdentityKeyPair(public_key=identity_pub, private_key=bytes(KEY_LEN))
-        key.verify(spk_pub, spk_sig)
+        vk = VerifyKey(identity_pub)
+        vk.verify(spk_pub, spk_sig)
     except Exception as e:
         raise SignedPreKeyVerificationError("Signed prekey signature verification failed") from e
 
@@ -241,6 +242,8 @@ def x3dh_responder(
     if bundle_is_hybrid and pq_ciphertext is not None and bundle.pq_secret_key is not None:
         if pq_backend is None:
             raise AlgorithmSuiteMismatchError("Responder bundle is hybrid but no PQ backend provided for decapsulation")
+        if len(pq_ciphertext) == 0:
+            raise X3DHInitializationError("PQ ciphertext empty (malformed or truncated)")
         pq_shared_val = pq_backend.decapsulate(pq_ciphertext, bundle.pq_secret_key)
     # else: classical or no PQ material -> pq_shared_val stays None
 

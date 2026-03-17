@@ -15,6 +15,9 @@ from typing import Any, Dict
 from client.crypto.ratchet_errors import InvalidHeaderError
 
 
+MAX_CIPHERTEXT_LEN = 1024 * 1024  # 1 MiB upper bound to mitigate DoS on huge payloads
+
+
 def b64_encode(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).decode("ascii").rstrip("=")
 
@@ -107,4 +110,9 @@ def wire_message_from_dict(data: Dict[str, Any]) -> RatchetWireMessage:
         raise InvalidHeaderError(f"invalid base64: {e}") from e
     if len(nonce) != 12:
         raise InvalidHeaderError("nonce must be 12 bytes")
+    # ChaCha20-Poly1305 tag is 16 bytes; ciphertext must be at least that.
+    if len(ciphertext) < 16:
+        raise InvalidHeaderError("ciphertext too short (invalid or truncated)")
+    if len(ciphertext) > MAX_CIPHERTEXT_LEN:
+        raise InvalidHeaderError("ciphertext too large")
     return RatchetWireMessage(header=header, ciphertext=ciphertext, nonce=nonce)

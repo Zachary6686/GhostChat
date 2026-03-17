@@ -367,3 +367,38 @@ def test_classical_only_backward_compatible_no_pq() -> None:
     assert result_init.root_key == result_resp.root_key
     assert result_init.pq_ciphertext is None
     assert result_init.algorithm_suite == ALGORITHM_SUITE_CLASSICAL
+
+
+def test_peer_bundle_with_pq_pub_requires_algorithm_suite() -> None:
+    """PeerBundle.from_dict requires algorithm_suite when pq_pub is present; stripping it raises ValueError."""
+    bundle = _make_hybrid_bundle(opk_count=1)
+    d = serialize_bundle(bundle, for_upload=True)
+    assert "pq_pub" in d
+    assert "algorithm_suite" in d
+    # Simulate downgrade/stripping of algorithm_suite while leaving pq_pub.
+    algo = d.pop("algorithm_suite")
+    assert "algorithm_suite" not in d and "pq_pub" in d
+    with pytest.raises(ValueError):
+        PeerBundle.from_dict(d)
+    # Putting algorithm_suite back restores validity.
+    d["algorithm_suite"] = algo
+    pb = PeerBundle.from_dict(d)
+    assert pb.pq_pub is not None
+
+
+def test_peer_bundle_from_dict_missing_required_fields_raise_value_error() -> None:
+    """Missing required fields in PeerBundle dict raise a clear ValueError instead of KeyError."""
+    bundle = _make_bundle(opk_count=1)
+    d = serialize_bundle(bundle, for_upload=True)
+    # Remove identity_pub.
+    d_bad = dict(d)
+    d_bad.pop("identity_pub", None)
+    with pytest.raises(ValueError):
+        PeerBundle.from_dict(d_bad)
+    # Remove nested SPK pub.
+    d_bad2 = dict(d)
+    spk = dict(d_bad2["spk"])
+    spk.pop("pub", None)
+    d_bad2["spk"] = spk
+    with pytest.raises(ValueError):
+        PeerBundle.from_dict(d_bad2)

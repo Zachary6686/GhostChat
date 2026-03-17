@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+# Upper bound on raw WebSocket message size to mitigate DoS.
+MAX_WEBSOCKET_MESSAGE_BYTES = 2 * 1024 * 1024  # 2 MiB
+
 # username -> websocket (connected user)
 _connections: Dict[str, WebSocket] = {}
 # username -> ephemeral_pub_b64 (legacy get_peer)
@@ -52,6 +55,11 @@ async def websocket_relay(websocket: WebSocket) -> None:
             except Exception as e:
                 logger.debug("receive_text: %s", e)
                 break
+
+            if len(raw) > MAX_WEBSOCKET_MESSAGE_BYTES:
+                logger.warning("WebSocket message too large: %d bytes", len(raw))
+                await _send_json(websocket, {"type": "error", "message": "message too large"})
+                continue
 
             try:
                 data = json.loads(raw)

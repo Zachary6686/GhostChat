@@ -37,6 +37,10 @@ class SessionRollbackError(RatchetError):
     """Session file was replaced with an older version (rollback detected)."""
 
 
+class SkipDistanceExceededError(RatchetError):
+    """Incoming message number gap exceeds configured MAX_SKIP_DISTANCE."""
+
+
 # --- X3DH session establishment ---
 
 

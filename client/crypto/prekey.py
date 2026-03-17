@@ -176,15 +176,37 @@ class PeerBundle:
     def from_dict(cls, data: Dict[str, Any]) -> "PeerBundle":
         if data.get("v") != BUNDLE_VERSION:
             raise ValueError("Unsupported bundle version")
-        identity_pub = b64u_decode(data["identity_pub"])
-        identity_dh_pub = b64u_decode(data["identity_dh_pub"])
-        spk = data["spk"]
-        spk_id = int(spk["key_id"])
-        spk_pub = b64u_decode(spk["pub"])
-        spk_sig = b64u_decode(spk["sig"]) if spk.get("sig") else b""
-        opks = [(int(o["key_id"]), b64u_decode(o["pub"])) for o in data.get("opks", [])]
+        try:
+            identity_pub_enc = data["identity_pub"]
+            identity_dh_pub_enc = data["identity_dh_pub"]
+            spk = data["spk"]
+            opks_raw = data.get("opks", [])
+        except KeyError as exc:
+            raise ValueError(f"Malformed peer bundle: missing field {exc}") from exc
+        identity_pub = b64u_decode(identity_pub_enc)
+        identity_dh_pub = b64u_decode(identity_dh_pub_enc)
+        try:
+            spk_id = int(spk["key_id"])
+            spk_pub = b64u_decode(spk["pub"])
+            spk_sig = b64u_decode(spk["sig"]) if spk.get("sig") else b""
+        except (KeyError, ValueError) as exc:
+            raise ValueError("Malformed peer bundle: invalid or missing SPK fields") from exc
+        opks: list[tuple[int, bytes]] = []
+        for o in opks_raw:
+            try:
+                kid = int(o["key_id"])
+                pub = b64u_decode(o["pub"])
+            except (KeyError, ValueError) as exc:
+                raise ValueError("Malformed peer bundle: invalid OPK entry") from exc
+            opks.append((kid, pub))
         pq_pub = b64u_decode(data["pq_pub"]) if data.get("pq_pub") else None
-        algorithm_suite = b64u_decode(data["algorithm_suite"]) if data.get("algorithm_suite") else ALGORITHM_SUITE_CLASSICAL
+        if pq_pub is not None and "algorithm_suite" not in data:
+            raise ValueError("Peer bundle with pq_pub must include algorithm_suite")
+        algorithm_suite = (
+            b64u_decode(data["algorithm_suite"])
+            if data.get("algorithm_suite")
+            else ALGORITHM_SUITE_CLASSICAL
+        )
         return cls(
             identity_pub=identity_pub,
             identity_dh_pub=identity_dh_pub,

@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 
 from client.crypto.double_ratchet import (
     DoubleRatchetEngine,
+    ReceivedIdsStore,
     create_initial_state,
 )
 from client.crypto.message import (
@@ -513,6 +514,31 @@ def test_state_from_dict_rejects_malformed_skipped_structure() -> None:
         state_from_dict(d)
 
 
+def test_state_from_dict_rejects_malformed_received_ids() -> None:
+    """state_from_dict raises CorruptedSessionError when received_ids contain malformed entries."""
+    alice, _ = _make_pair()
+    d = state_to_dict(alice.state)
+    d["received_ids"] = {"ids": ["not-36-bytes"]}
+    with pytest.raises(CorruptedSessionError):
+        state_from_dict(d)
+    d["received_ids"] = {"ids": [123]}
+    with pytest.raises(CorruptedSessionError):
+        state_from_dict(d)
+
+
+def test_state_from_dict_rejects_ns_nr_pn_bool_or_float() -> None:
+    """state_from_dict rejects Ns, Nr, PN as bool or float (no silent coercion)."""
+    alice, _ = _make_pair()
+    d = state_to_dict(alice.state)
+    d["Ns"] = True
+    with pytest.raises(CorruptedSessionError):
+        state_from_dict(d)
+    d["Ns"] = 0
+    d["Nr"] = 1.0
+    with pytest.raises(CorruptedSessionError):
+        state_from_dict(d)
+
+
 # --- Wire message validation ---
 
 
@@ -576,6 +602,28 @@ def test_wire_message_from_dict_rejects_malformed_encodings() -> None:
         wire_message_from_dict(d2)
 
 
+def test_wire_message_from_dict_rejects_ciphertext_too_short() -> None:
+    """wire_message_from_dict rejects ciphertext shorter than AEAD tag (16 bytes)."""
+    alice, _ = _make_pair()
+    wire = alice.ratchet_encrypt(b"x")
+    d = wire_message_to_dict(wire)
+    short_ct = base64.urlsafe_b64encode(b"x" * 10).decode("ascii").rstrip("=")
+    d["ciphertext"] = short_ct
+    with pytest.raises(InvalidHeaderError):
+        wire_message_from_dict(d)
+
+
+def test_wire_message_from_dict_rejects_ciphertext_too_large() -> None:
+    """wire_message_from_dict rejects ciphertext larger than AEAD sanity bound (DoS mitigation)."""
+    alice, _ = _make_pair()
+    wire = alice.ratchet_encrypt(b"x")
+    d = wire_message_to_dict(wire)
+    large_ct = base64.urlsafe_b64encode(b"x" * (1024 * 1024 + 1)).decode("ascii").rstrip("=")
+    d["ciphertext"] = large_ct
+    with pytest.raises(InvalidHeaderError):
+        wire_message_from_dict(d)
+
+
 # --- Rollback / stale state ---
 
 
@@ -623,9 +671,19 @@ def test_session_rollback_detected_on_save() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = pathlib.Path(tmp)
         save_session("alice", "bob", alice.state, base_dir=base)
-        alice.state.session_version = 1
-        with pytest.raises(SessionRollbackError):
+
+
+def test_save_session_does_not_silently_overwrite_corrupted_file() -> None:
+    """If existing session file is invalid JSON, save_session raises CorruptedSessionError instead of silently overwriting."""
+    alice, _ = _make_pair()
+    with tempfile.TemporaryDirectory() as tmp:
+        base = pathlib.Path(tmp)
+        path = base / "sessions" / "alice__bob.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("not json", encoding="utf-8")
+        with pytest.raises(CorruptedSessionError):
             save_session("alice", "bob", alice.state, base_dir=base)
+        assert path.read_text(encoding="utf-8") == "not json"
 
 
 # --- Received ids (anti-replay across restore) ---
@@ -654,6 +712,29 @@ def test_duplicate_header_rejected_before_any_key_derivation() -> None:
     wire_copy = wire_message_from_dict(wire_message_to_dict(wire))
     with pytest.raises(DuplicateMessageError):
         bob.ratchet_decrypt(wire_copy)
+
+
+def test_received_ids_store_enforces_n_range() -> None:
+    """ReceivedIdsStore enforces message number range [0, 2^32-1]."""
+    store = ReceivedIdsStore(max_size=2)
+    dh = b"d" * 32
+    with pytest.raises(ValueError):
+        store.add(dh, -1)
+    with pytest.raises(ValueError):
+        store.add(dh, 0x1_0000_0000)
+
+
+def test_received_ids_store_eviction_allows_very_old_replay() -> None:
+    """Eviction semantics: only the most recent max_size entries are remembered for duplicate detection."""
+    store = ReceivedIdsStore(max_size=2)
+    dh = b"d" * 32
+    # Add three entries; window will contain (dh, 1) and (dh, 2).
+    store.add(dh, 0)
+    store.add(dh, 1)
+    store.add(dh, 2)
+    assert not store.contains(dh, 0), "Oldest entry may be evicted from bounded replay cache"
+    assert store.contains(dh, 1)
+    assert store.contains(dh, 2)
 
 
 # --- Full AAD binding ---

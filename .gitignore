@@ -1,4 +1,4 @@
-# pytest
+# pytest (cache disabled in pyproject.toml via -p no:cacheprovider)
 .pytest_cache/
 pytest-cache-files-*
 
@@ -39,3 +39,21 @@ build/
 dist/
 *.egg-info/
 *.egg
+
+# --- GhostChat security critical ---
+identity.json
+bundle.json
+sessions/
+*.session
+
+# keys / crypto material
+*.key
+*.pem
+*.der
+
+# runtime artifacts
+*.tmp
+*.cache
+
+# optional: sqlite / local db
+*.db

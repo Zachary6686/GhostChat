@@ -13,6 +13,8 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+import os
+
 from client.crypto.double_ratchet import DoubleRatchetState, ReceivedIdsStore, SkippedMessageKeys
 from client.crypto.ratchet_errors import CorruptedSessionError, SessionRollbackError, SkippedKeyStorageLimitError
 
@@ -67,10 +69,19 @@ def _require_b64_key(name: str, raw: bytes, length: int = 32) -> None:
         raise CorruptedSessionError(f"Invalid {name} length: expected {length}, got {len(raw)}")
 
 
+def _require_str_b64(name: str, raw: object) -> bytes:
+    """Decode base64 field; reject non-string types to avoid silent coercion."""
+    if not isinstance(raw, str):
+        raise CorruptedSessionError(f"{name} must be a string (base64)")
+    out = _b64d(raw)
+    _require_b64_key(name, out)
+    return out
+
+
 def state_from_dict(data: dict, max_skipped_keys: int = 1000) -> DoubleRatchetState:
     """
-    Deserialize from dict. Validates version, key lengths, and required fields.
-    Raises CorruptedSessionError on invalid or missing data.
+    Deserialize from dict. Validates version, key lengths, types, and required fields.
+    Raises CorruptedSessionError on invalid or missing data. No silent coercion.
     """
     if not isinstance(data, dict):
         raise CorruptedSessionError("Session data must be a dict")
@@ -81,38 +92,38 @@ def state_from_dict(data: dict, max_skipped_keys: int = 1000) -> DoubleRatchetSt
     except KeyError:
         raise CorruptedSessionError("Missing root_key")
 
-    def _b64_field(raw: object, name: str) -> bytes:
-        s = raw if isinstance(raw, str) else str(raw)
-        out = _b64d(s)
-        _require_b64_key(name, out)
-        return out
-
-    root_key = _b64_field(root_key_b64, "root_key")
+    root_key = _require_str_b64("root_key", root_key_b64)
 
     ck_s: Optional[bytes] = None
     if data.get("sending_chain_key") is not None:
-        ck_s = _b64_field(data["sending_chain_key"], "sending_chain_key")
+        ck_s = _require_str_b64("sending_chain_key", data["sending_chain_key"])
 
     ck_r: Optional[bytes] = None
     if data.get("receiving_chain_key") is not None:
-        ck_r = _b64_field(data["receiving_chain_key"], "receiving_chain_key")
+        ck_r = _require_str_b64("receiving_chain_key", data["receiving_chain_key"])
 
     dhs_private = data.get("dhs_private")
     if dhs_private is not None:
-        dhs_private = _b64_field(dhs_private, "dhs_private")
+        dhs_private = _require_str_b64("dhs_private", dhs_private)
 
     dhr = data.get("dhr")
     if dhr is not None:
-        dhr = _b64_field(dhr, "dhr")
+        dhr = _require_str_b64("dhr", dhr)
 
-    try:
-        Ns = int(data.get("Ns", 0))
-        Nr = int(data.get("Nr", 0))
-        PN = int(data.get("PN", 0))
-    except (TypeError, ValueError) as e:
-        raise CorruptedSessionError(f"Invalid Ns/Nr/PN: {e}") from e
-    if Ns < 0 or Nr < 0 or PN < 0:
-        raise CorruptedSessionError("Ns, Nr, PN must be non-negative")
+    def _require_counter(name: str, val: object) -> int:
+        if val is None:
+            return 0
+        if not isinstance(val, int):
+            raise CorruptedSessionError(f"{name} must be an integer")
+        if isinstance(val, bool):
+            raise CorruptedSessionError(f"{name} must be an integer, not bool")
+        if val < 0:
+            raise CorruptedSessionError(f"{name} must be non-negative")
+        return val
+
+    Ns = _require_counter("Ns", data.get("Ns"))
+    Nr = _require_counter("Nr", data.get("Nr"))
+    PN = _require_counter("PN", data.get("PN"))
 
     skipped_data = data.get("skipped")
     if skipped_data is not None and not isinstance(skipped_data, dict):
@@ -122,14 +133,20 @@ def state_from_dict(data: dict, max_skipped_keys: int = 1000) -> DoubleRatchetSt
     except (ValueError, SkippedKeyStorageLimitError) as e:
         raise CorruptedSessionError(f"Invalid skipped keys: {e}") from e
 
-    session_version = int(data.get("session_version", 1))
-    if session_version < 1:
+    sv = data.get("session_version", 1)
+    if not isinstance(sv, int) or isinstance(sv, bool):
+        raise CorruptedSessionError("session_version must be an integer")
+    if sv < 1:
         raise CorruptedSessionError("session_version must be >= 1")
+    session_version = sv
     received_ids_data = data.get("received_ids")
-    received_ids = ReceivedIdsStore.from_dict(
-        received_ids_data if isinstance(received_ids_data, dict) else None,
-        max_size=2000,
-    )
+    try:
+        received_ids = ReceivedIdsStore.from_dict(
+            received_ids_data if isinstance(received_ids_data, dict) else None,
+            max_size=2000,
+        )
+    except ValueError as e:
+        raise CorruptedSessionError(f"Invalid received_ids: {e}") from e
 
     return DoubleRatchetState(
         root_key=root_key,
@@ -152,7 +169,17 @@ def save_session(
     state: DoubleRatchetState,
     base_dir: Optional[Path] = None,
 ) -> Path:
-    """Write session state to file. Creates sessions dir if needed. Anti-rollback: if file exists with a higher session_version, raises SessionRollbackError."""
+    """Write session state to file.
+
+    Semantics:
+      - Sessions are SINGLE-WRITER: concurrent writes to the same file are
+        unsupported and may corrupt state at the filesystem level.
+      - Anti-rollback: if file exists with a higher session_version than
+        the in-memory state, raises SessionRollbackError.
+      - Atomic write best-effort: JSON is written to a temporary file in the
+        same directory and then atomically renamed into place so that a
+        partially-written session file is never observed.
+    """
     path = _session_path(local_username, remote_username, base_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     current_version = getattr(state, "session_version", 1)
@@ -165,11 +192,20 @@ def save_session(
                 raise SessionRollbackError(
                     f"Session rollback detected: file version {file_version} > in-memory version {current_version}"
                 )
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            raise CorruptedSessionError(f"Existing session file is invalid JSON: {e}") from e
     state.session_version = current_version + 1
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(state_to_dict(state), f, indent=0)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    data = state_to_dict(state)
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=0)
+        try:
+            f.flush()
+            os.fsync(f.fileno())
+        except (OSError, AttributeError):
+            # Best-effort fsync; on some platforms this may be a no-op.
+            pass
+    os.replace(tmp_path, path)
     logger.debug("Session saved: %s", path)
     return path
 
