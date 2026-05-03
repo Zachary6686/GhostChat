@@ -75,3 +75,21 @@ def test_simultaneous_send_race_handling() -> None:
     assert r_from_bob == b"bob-race"
     assert r_from_alice == b"alice-race"
 
+
+def test_failed_decrypt_does_not_consume_ratchet_state() -> None:
+    alice, bob = _linked_sessions()
+    msg = alice.encrypt(b"real")
+    tampered = EncryptedMessage(
+        header=msg.header,
+        ciphertext=msg.ciphertext[:-1] + bytes([msg.ciphertext[-1] ^ 0x01]),
+    )
+
+    try:
+        bob.decrypt(tampered)
+    except Exception:
+        pass
+    else:  # pragma: no cover - defensive
+        raise AssertionError("expected tampered ciphertext to fail")
+
+    assert bob.decrypt(msg) == b"real"
+

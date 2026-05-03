@@ -39,6 +39,15 @@ def test_replay_cache_bounded_capacity() -> None:
     cache = SessionReplayCache(max_entries=2)
     assert cache.accept(_env(b"s", b"rk", 1))
     assert cache.accept(_env(b"s", b"rk", 2))
-    # New, distinct envelope when at capacity should be rejected.
-    assert not cache.accept(_env(b"s", b"rk", 3))
+    # New, distinct envelopes evict old entries instead of permanently
+    # disabling the session once the cache reaches capacity.
+    assert cache.accept(_env(b"s", b"rk", 3))
+
+
+def test_replay_cache_allows_out_of_order_message_numbers() -> None:
+    cache = SessionReplayCache(max_entries=4)
+    assert cache.accept(_env(b"s", b"rk", 1))
+    assert cache.accept(_env(b"s", b"rk", 3))
+    assert cache.accept(_env(b"s", b"rk", 2))
+    assert not cache.accept(_env(b"s", b"rk", 2))
 

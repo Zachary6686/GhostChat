@@ -99,6 +99,45 @@ def test_protocol_integration_replay_triggers_reset() -> None:
         raise AssertionError("Expected replay to trigger reset and error")
 
 
+def test_session_manager_delivers_out_of_order_messages() -> None:
+    alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
+
+    m1 = alice_mgr.encrypt_for(peer_id, b"m1")
+    m2 = alice_mgr.encrypt_for(peer_id, b"m2")
+    m3 = alice_mgr.encrypt_for(peer_id, b"m3")
+
+    assert bob_mgr.decrypt_from(peer_id, m1) == b"m1"
+    assert bob_mgr.decrypt_from(peer_id, m3) == b"m3"
+    assert bob_mgr.decrypt_from(peer_id, m2) == b"m2"
+
+
+def test_invalid_envelope_does_not_poison_session_state() -> None:
+    alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
+
+    valid = alice_mgr.encrypt_for(peer_id, b"survives forgery")
+    forged = ProtocolEnvelope(
+        version=valid.version,
+        session_id=valid.session_id,
+        sender_ratchet_key=valid.sender_ratchet_key,
+        message_number=valid.message_number,
+        previous_chain_length=valid.previous_chain_length,
+        ciphertext=valid.ciphertext[:-1] + bytes([valid.ciphertext[-1] ^ 1]),
+        nonce=valid.nonce,
+        meta=valid.meta,
+    )
+
+    try:
+        bob_mgr.decrypt_from(peer_id, forged)
+    except Exception:
+        pass
+    else:  # pragma: no cover - defensive
+        raise AssertionError("Expected forged ciphertext to fail authentication")
+
+    assert bob_mgr.decrypt_from(peer_id, valid) == b"survives forgery"
+    ctx = bob_mgr._sessions[peer_id]
+    assert not ctx.reset_state.needs_reset
+
+
 def test_end_to_end_via_relay_router() -> None:
     """
     Minimal end-to-end flow:

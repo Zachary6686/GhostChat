@@ -35,3 +35,6 @@ class SkippedKeyStore:
     def __len__(self) -> int:  # pragma: no cover - trivial
         return len(self._store)
 
+    def copy(self) -> "SkippedKeyStore":
+        return SkippedKeyStore(max_keys=self.max_keys, _store=dict(self._store))
+
