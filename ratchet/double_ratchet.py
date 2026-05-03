@@ -127,40 +127,44 @@ class DoubleRatchet:
         Decrypt a message, handling out-of-order delivery and skipped keys.
         """
 
+        snapshot = self._snapshot_state()
         h = message.header
+        try:
+            # 1. Skipped message keys first.
+            if self.state.skipped_keys.has(h.dh_pub, h.n):
+                mk = self.state.skipped_keys.pop(h.dh_pub, h.n)
+                nonce = _mk_to_nonce(mk, h.n)
+                return _aead_decrypt(mk, nonce, message.ciphertext, ad)
 
-        # 1. Skipped message keys first.
-        if self.state.skipped_keys.has(h.dh_pub, h.n):
-            mk = self.state.skipped_keys.pop(h.dh_pub, h.n)
+            # 2a. If we have no receiving chain yet but the DH public key matches
+            # our stored DHR, derive the initial receiving chain.
+            if self.state.ck_r is None and self.state.dhr is not None and h.dh_pub == self.state.dhr:
+                peer_pub = X25519PublicKey(self.state.dhr)
+                rk, ck_r = kdf_root(self.state.root_key, _dh(self.state.dhs, peer_pub))
+                self.state.root_key = rk
+                self.state.ck_r = ck_r
+
+            # 2b. Maybe advance the DH ratchet if the DH public key changed.
+            if self.state.dhr is None or h.dh_pub != self.state.dhr:
+                self._skip_message_keys(until=h.pn)
+                self._dh_ratchet_receive(h.dh_pub)
+
+            # 3. Now derive/skip within the current receiving chain.
+            if h.n < self.state.Nr:
+                raise DuplicateMessageError("Message number already processed in this chain")
+
+            # Skip any unseen messages up to n-1, caching their keys.
+            self._skip_message_keys(until=h.n)
+
+            # Derive key for this message.
+            self.state.ck_r, mk = kdf_chain(self.state.ck_r)  # type: ignore[arg-type]
+            self.state.Nr += 1
+
             nonce = _mk_to_nonce(mk, h.n)
             return _aead_decrypt(mk, nonce, message.ciphertext, ad)
-
-        # 2a. If we have no receiving chain yet but the DH public key matches
-        # our stored DHR, derive the initial receiving chain.
-        if self.state.ck_r is None and self.state.dhr is not None and h.dh_pub == self.state.dhr:
-            peer_pub = X25519PublicKey(self.state.dhr)
-            rk, ck_r = kdf_root(self.state.root_key, _dh(self.state.dhs, peer_pub))
-            self.state.root_key = rk
-            self.state.ck_r = ck_r
-
-        # 2b. Maybe advance the DH ratchet if the DH public key changed.
-        if self.state.dhr is None or h.dh_pub != self.state.dhr:
-            self._skip_message_keys(until=self.state.Nr)
-            self._dh_ratchet_receive(h.dh_pub)
-
-        # 3. Now derive/skip within the current receiving chain.
-        if h.n < self.state.Nr:
-            raise DuplicateMessageError("Message number already processed in this chain")
-
-        # Skip any unseen messages up to n-1, caching their keys.
-        self._skip_message_keys(until=h.n)
-
-        # Derive key for this message.
-        self.state.ck_r, mk = kdf_chain(self.state.ck_r)  # type: ignore[arg-type]
-        self.state.Nr += 1
-
-        nonce = _mk_to_nonce(mk, h.n)
-        return _aead_decrypt(mk, nonce, message.ciphertext, ad)
+        except Exception:
+            self._restore_state(snapshot)
+            raise
 
     # --- internal helpers ---
 
@@ -177,6 +181,22 @@ class DoubleRatchet:
             self.state.ck_r, mk = kdf_chain(self.state.ck_r)
             self.state.skipped_keys.add(self.state.dhr or b"", self.state.Nr, mk)
             self.state.Nr += 1
+
+    def _snapshot_state(self) -> RatchetState:
+        return RatchetState(
+            root_key=self.state.root_key,
+            dhs=self.state.dhs,
+            dhr=self.state.dhr,
+            ck_s=self.state.ck_s,
+            ck_r=self.state.ck_r,
+            Ns=self.state.Ns,
+            Nr=self.state.Nr,
+            PN=self.state.PN,
+            skipped_keys=self.state.skipped_keys.copy(),
+        )
+
+    def _restore_state(self, snapshot: RatchetState) -> None:
+        self.state = snapshot
 
     def _dh_ratchet_receive(self, new_remote_dh: bytes) -> None:
         """

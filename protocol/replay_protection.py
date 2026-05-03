@@ -7,8 +7,9 @@ This module provides a bounded replay cache keyed by session, ratchet
 key, and message number. It is deterministic and testable.
 """
 
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, Hashable, Set, Tuple
+from typing import Deque, Set, Tuple
 
 from .envelope import ProtocolEnvelope
 
@@ -20,34 +21,51 @@ CacheKey = Tuple[bytes, bytes, int]  # (session_id, sender_ratchet_key, message_
 class SessionReplayCache:
     max_entries: int = 1024
     seen: Set[CacheKey] = field(default_factory=set)
-    highest_by_ratchet: Dict[bytes, int] = field(default_factory=dict)
+    order: Deque[CacheKey] = field(default_factory=deque)
 
     def _make_key(self, env: ProtocolEnvelope) -> CacheKey:
         return (env.session_id, env.sender_ratchet_key, env.message_number)
 
-    def accept(self, env: ProtocolEnvelope) -> bool:
+    def is_replay(self, env: ProtocolEnvelope) -> bool:
         """
-        Return True if this envelope is accepted as fresh; False if it
-        should be treated as a replay or stale.
+        Return True if this envelope's authenticated header was already seen.
+        """
+
+        return self._make_key(env) in self.seen
+
+    def record(self, env: ProtocolEnvelope) -> bool:
+        """
+        Record an authenticated envelope as seen.
+
+        The double ratchet supports out-of-order delivery, so lower message
+        numbers on a ratchet key are not stale by themselves. Keep only exact
+        header identities here and evict oldest entries to stay bounded.
         """
 
         key = self._make_key(env)
         if key in self.seen:
-            # Exact duplicate.
             return False
 
-        last = self.highest_by_ratchet.get(env.sender_ratchet_key)
-        if last is not None and env.message_number < last:
-            # Stale message number for this ratchet key.
-            return False
+        if self.max_entries <= 0:
+            return True
 
-        # Bounded tracking: if at capacity and this is new, reject to
-        # avoid unbounded memory growth.
-        if len(self.seen) >= self.max_entries:
-            return False
+        while len(self.seen) >= self.max_entries and self.order:
+            oldest = self.order.popleft()
+            self.seen.discard(oldest)
 
         self.seen.add(key)
-        if last is None or env.message_number > last:
-            self.highest_by_ratchet[env.sender_ratchet_key] = env.message_number
+        self.order.append(key)
         return True
+
+    def accept(self, env: ProtocolEnvelope) -> bool:
+        """
+        Return True if this envelope is accepted as fresh and record it.
+
+        Session decryption code should prefer is_replay() before AEAD
+        authentication and record() only after authentication succeeds.
+        """
+
+        if self.is_replay(env):
+            return False
+        return self.record(env)
 

@@ -98,12 +98,20 @@ class SessionManager:
     def decrypt_from(self, peer_id: bytes, env: ProtocolEnvelope) -> bytes:
         ctx = self._get_ctx(peer_id)
 
-        # Replay protection first.
-        if not ctx.replay_cache.accept(env):
+        # Reject only headers that were already authenticated. Invalid traffic
+        # must not be able to poison replay/fork state before AEAD verification.
+        if ctx.replay_cache.is_replay(env):
             mark_for_reset(ctx.reset_state, "replay-detected")
             raise ValueError("replayed or stale envelope")
 
-        # Fork detection next.
+        header = RatchetHeader(
+            dh_pub=env.sender_ratchet_key,
+            pn=env.previous_chain_length,
+            n=env.message_number,
+        )
+        em = EncryptedMessage(header=header, ciphertext=env.ciphertext)
+        plaintext = ctx.ratchet.decrypt(em)
+
         if detect_fork(
             ctx.fork_state,
             env.sender_ratchet_key,
@@ -113,14 +121,8 @@ class SessionManager:
             mark_for_reset(ctx.reset_state, "fork-detected")
             raise ValueError("fork detected")
 
-        # Construct ratchet header and decrypt.
-        header = RatchetHeader(
-            dh_pub=env.sender_ratchet_key,
-            pn=env.previous_chain_length,
-            n=env.message_number,
-        )
-        em = EncryptedMessage(header=header, ciphertext=env.ciphertext)
-        return ctx.ratchet.decrypt(em)
+        ctx.replay_cache.record(env)
+        return plaintext
 
     # ---- sealed sender ----
 
@@ -182,12 +184,9 @@ class SessionManager:
                 nonce=b"",
                 meta={},
             )
-            if not ctx.replay_cache.accept(syn):
+            if ctx.replay_cache.is_replay(syn):
                 mark_for_reset(ctx.reset_state, "replay-detected")
                 raise ValueError("replayed or stale sealed envelope")
-            if detect_fork(ctx.fork_state, inner.dh_pub, inner.n, inner.pn):
-                mark_for_reset(ctx.reset_state, "fork-detected")
-                raise ValueError("fork detected")
             header = RatchetHeader(
                 dh_pub=inner.dh_pub,
                 pn=inner.pn,
@@ -196,6 +195,10 @@ class SessionManager:
             plaintext = ctx.ratchet.decrypt(
                 EncryptedMessage(header=header, ciphertext=inner.ciphertext)
             )
+            if detect_fork(ctx.fork_state, inner.dh_pub, inner.n, inner.pn):
+                mark_for_reset(ctx.reset_state, "fork-detected")
+                raise ValueError("fork detected")
+            ctx.replay_cache.record(syn)
             return (peer_id, plaintext)
         raise ValueError(
             "sealed payload could not be decrypted with any session"
