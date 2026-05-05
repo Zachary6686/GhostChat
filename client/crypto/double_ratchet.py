@@ -319,6 +319,22 @@ class DoubleRatchetEngine:
     def state(self) -> DoubleRatchetState:
         return self._state
 
+    def _snapshot_state(self) -> DoubleRatchetState:
+        return copy.deepcopy(self._state)
+
+    def _restore_state(self, snapshot: DoubleRatchetState) -> None:
+        self._state.root_key = snapshot.root_key
+        self._state.sending_chain_key = snapshot.sending_chain_key
+        self._state.receiving_chain_key = snapshot.receiving_chain_key
+        self._state.dhs_private = snapshot.dhs_private
+        self._state.dhr = snapshot.dhr
+        self._state.Ns = snapshot.Ns
+        self._state.Nr = snapshot.Nr
+        self._state.PN = snapshot.PN
+        self._state.skipped_message_keys = snapshot.skipped_message_keys
+        self._state.received_ids = snapshot.received_ids
+        self._state.session_version = snapshot.session_version
+
     def ratchet_encrypt(self, plaintext: bytes) -> RatchetWireMessage:
         """
         Encrypt (send). Spec: 3.1 Encrypt.
