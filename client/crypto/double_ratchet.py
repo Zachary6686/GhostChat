@@ -25,6 +25,7 @@ Key invariants (security-critical)
 from __future__ import annotations
 
 import base64
+import copy
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -375,6 +376,18 @@ class DoubleRatchetEngine:
         # Replay: (dh, n) already accepted. received_ids is bounded FIFO; very old ids may be evicted.
         if state.received_ids.contains(h.dh, h.n):
             raise DuplicateMessageError("Message already processed (replay or duplicate header)")
+
+        snapshot = self._snapshot_state()
+        try:
+            return self._ratchet_decrypt_after_replay_check(msg)
+        except Exception:
+            self._restore_state(snapshot)
+            raise
+
+    def _ratchet_decrypt_after_replay_check(self, msg: RatchetWireMessage) -> bytes:
+        """Decrypt after stateless validation, restoring caller state on ratchet errors."""
+        state = self._state
+        h = msg.header
 
         # Same DH ratchet, out-of-order: use skipped key if we have it.
         if state.skipped_message_keys.has(h.dh, h.n):
