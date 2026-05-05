@@ -25,6 +25,7 @@ Key invariants (security-critical)
 from __future__ import annotations
 
 import base64
+import copy
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -318,6 +319,22 @@ class DoubleRatchetEngine:
     def state(self) -> DoubleRatchetState:
         return self._state
 
+    def _snapshot_state(self) -> DoubleRatchetState:
+        return copy.deepcopy(self._state)
+
+    def _restore_state(self, snapshot: DoubleRatchetState) -> None:
+        self._state.root_key = snapshot.root_key
+        self._state.sending_chain_key = snapshot.sending_chain_key
+        self._state.receiving_chain_key = snapshot.receiving_chain_key
+        self._state.dhs_private = snapshot.dhs_private
+        self._state.dhr = snapshot.dhr
+        self._state.Ns = snapshot.Ns
+        self._state.Nr = snapshot.Nr
+        self._state.PN = snapshot.PN
+        self._state.skipped_message_keys = snapshot.skipped_message_keys
+        self._state.received_ids = snapshot.received_ids
+        self._state.session_version = snapshot.session_version
+
     def ratchet_encrypt(self, plaintext: bytes) -> RatchetWireMessage:
         """
         Encrypt (send). Spec: 3.1 Encrypt.
@@ -375,6 +392,18 @@ class DoubleRatchetEngine:
         # Replay: (dh, n) already accepted. received_ids is bounded FIFO; very old ids may be evicted.
         if state.received_ids.contains(h.dh, h.n):
             raise DuplicateMessageError("Message already processed (replay or duplicate header)")
+
+        snapshot = self._snapshot_state()
+        try:
+            return self._ratchet_decrypt_after_replay_check(msg)
+        except Exception:
+            self._restore_state(snapshot)
+            raise
+
+    def _ratchet_decrypt_after_replay_check(self, msg: RatchetWireMessage) -> bytes:
+        """Decrypt after stateless validation, restoring caller state on ratchet errors."""
+        state = self._state
+        h = msg.header
 
         # Same DH ratchet, out-of-order: use skipped key if we have it.
         if state.skipped_message_keys.has(h.dh, h.n):
