@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 
 from client.crypto.message import wire_message_from_dict, wire_message_to_dict
 from client.crypto.ratchet import SessionCrypto
-from client.crypto.ratchet_errors import DecryptionError
+from client.crypto.ratchet_errors import DecryptionError, InvalidHeaderError
 
 logger = logging.getLogger(__name__)
 
@@ -172,9 +172,9 @@ class GhostChatWebSocketClient:
         if self._double_ratchet is not None:
             try:
                 payload_dict = json.loads(payload_raw)
-            except json.JSONDecodeError as e:
+                wire = wire_message_from_dict(payload_dict)
+            except (json.JSONDecodeError, TypeError, InvalidHeaderError) as e:
                 raise DecryptionError("Invalid double ratchet payload") from e
-            wire = wire_message_from_dict(payload_dict)
             payload = self._double_ratchet.ratchet_decrypt(wire)
             return from_user, payload
         padding = "=" * (-len(payload_raw) % 4)
