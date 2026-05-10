@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import base64
 from collections import OrderedDict
-from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -320,6 +319,26 @@ class DoubleRatchetEngine:
         return self._state
 
     @staticmethod
+    def _snapshot_state(state: DoubleRatchetState) -> DoubleRatchetState:
+        skipped = SkippedMessageKeys(max_keys=state.skipped_message_keys.max_keys)
+        skipped._store = state.skipped_message_keys._store.copy()
+        received = ReceivedIdsStore(max_size=state.received_ids.max_size)
+        received._order = state.received_ids._order.copy()
+        return DoubleRatchetState(
+            root_key=state.root_key,
+            sending_chain_key=state.sending_chain_key,
+            receiving_chain_key=state.receiving_chain_key,
+            dhs_private=state.dhs_private,
+            dhr=state.dhr,
+            Ns=state.Ns,
+            Nr=state.Nr,
+            PN=state.PN,
+            skipped_message_keys=skipped,
+            received_ids=received,
+            session_version=state.session_version,
+        )
+
+    @staticmethod
     def _restore_state(state: DoubleRatchetState, snapshot: DoubleRatchetState) -> None:
         state.root_key = snapshot.root_key
         state.sending_chain_key = snapshot.sending_chain_key
@@ -391,7 +410,7 @@ class DoubleRatchetEngine:
         if state.received_ids.contains(h.dh, h.n):
             raise DuplicateMessageError("Message already processed (replay or duplicate header)")
 
-        snapshot = deepcopy(state)
+        snapshot = self._snapshot_state(state)
         try:
             # Same DH ratchet, out-of-order: use skipped key if we have it.
             if state.skipped_message_keys.has(h.dh, h.n):
