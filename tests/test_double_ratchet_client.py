@@ -137,6 +137,60 @@ def test_corrupted_ciphertext_rejected() -> None:
         bob.ratchet_decrypt(tampered)
 
 
+def test_failed_decrypt_does_not_consume_current_message_key() -> None:
+    """A corrupted in-order delivery must not prevent decrypting a later retry."""
+    alice, bob = _make_pair()
+    wire = alice.ratchet_encrypt(b"secret")
+    tampered = RatchetWireMessage(
+        header=wire.header,
+        ciphertext=bytes(32),
+        nonce=wire.nonce,
+    )
+
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.ratchet_decrypt(wire) == b"secret"
+
+
+def test_failed_decrypt_does_not_consume_skipped_message_key() -> None:
+    """A corrupted out-of-order retry must not delete the stored skipped key."""
+    alice, bob = _make_pair()
+    w0 = alice.ratchet_encrypt(b"m0")
+    w1 = alice.ratchet_encrypt(b"m1")
+    assert bob.ratchet_decrypt(w1) == b"m1"
+    tampered = RatchetWireMessage(
+        header=w0.header,
+        ciphertext=bytes(32),
+        nonce=w0.nonce,
+    )
+
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.ratchet_decrypt(w0) == b"m0"
+
+
+def test_failed_decrypt_does_not_commit_new_dh_ratchet() -> None:
+    """A corrupted first message on a new DH ratchet must be retryable."""
+    alice, bob = _make_pair()
+    first = alice.ratchet_encrypt(b"first")
+    assert bob.ratchet_decrypt(first) == b"first"
+    reply = bob.ratchet_encrypt(b"reply")
+    assert alice.ratchet_decrypt(reply) == b"reply"
+    new_ratchet_wire = alice.ratchet_encrypt(b"after ratchet")
+    tampered = RatchetWireMessage(
+        header=new_ratchet_wire.header,
+        ciphertext=bytes(32),
+        nonce=new_ratchet_wire.nonce,
+    )
+
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.ratchet_decrypt(new_ratchet_wire) == b"after ratchet"
+
+
 def test_invalid_header_rejected() -> None:
     """wire_message_from_dict rejects missing or invalid header fields."""
     with pytest.raises(InvalidHeaderError):
