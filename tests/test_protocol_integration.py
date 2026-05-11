@@ -99,6 +99,32 @@ def test_protocol_integration_replay_triggers_reset() -> None:
         raise AssertionError("Expected replay to trigger reset and error")
 
 
+def test_failed_protocol_decrypt_does_not_poison_replay_or_ratchet_state() -> None:
+    alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
+    env = alice_mgr.encrypt_for(peer_id, b"recoverable")
+    bad_ct = bytearray(env.ciphertext)
+    bad_ct[0] ^= 0x01
+    tampered = ProtocolEnvelope(
+        version=env.version,
+        session_id=env.session_id,
+        sender_ratchet_key=env.sender_ratchet_key,
+        message_number=env.message_number,
+        previous_chain_length=env.previous_chain_length,
+        ciphertext=bytes(bad_ct),
+        nonce=env.nonce,
+        meta=env.meta,
+    )
+
+    try:
+        bob_mgr.decrypt_from(peer_id, tampered)
+    except Exception:
+        pass
+    else:  # pragma: no cover - defensive
+        raise AssertionError("Expected tampered ciphertext to fail")
+
+    assert bob_mgr.decrypt_from(peer_id, env) == b"recoverable"
+
+
 def test_end_to_end_via_relay_router() -> None:
     """
     Minimal end-to-end flow:

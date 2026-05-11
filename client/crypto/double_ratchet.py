@@ -318,6 +318,46 @@ class DoubleRatchetEngine:
     def state(self) -> DoubleRatchetState:
         return self._state
 
+    def _snapshot_state(self) -> DoubleRatchetState:
+        state = self._state
+        skipped = SkippedMessageKeys(max_keys=state.skipped_message_keys.max_keys)
+        skipped._store = OrderedDict(
+            ((bytes(dh), n), bytes(key))
+            for (dh, n), key in state.skipped_message_keys._store.items()
+        )
+        received = ReceivedIdsStore(max_size=state.received_ids.max_size)
+        received._order = OrderedDict(
+            ((bytes(dh), n), None)
+            for (dh, n) in state.received_ids._order.keys()
+        )
+        return DoubleRatchetState(
+            root_key=bytes(state.root_key),
+            sending_chain_key=bytes(state.sending_chain_key) if state.sending_chain_key is not None else None,
+            receiving_chain_key=bytes(state.receiving_chain_key) if state.receiving_chain_key is not None else None,
+            dhs_private=bytes(state.dhs_private) if state.dhs_private is not None else None,
+            dhr=bytes(state.dhr) if state.dhr is not None else None,
+            Ns=state.Ns,
+            Nr=state.Nr,
+            PN=state.PN,
+            skipped_message_keys=skipped,
+            received_ids=received,
+            session_version=state.session_version,
+        )
+
+    def _restore_state(self, snapshot: DoubleRatchetState) -> None:
+        state = self._state
+        state.root_key = snapshot.root_key
+        state.sending_chain_key = snapshot.sending_chain_key
+        state.receiving_chain_key = snapshot.receiving_chain_key
+        state.dhs_private = snapshot.dhs_private
+        state.dhr = snapshot.dhr
+        state.Ns = snapshot.Ns
+        state.Nr = snapshot.Nr
+        state.PN = snapshot.PN
+        state.skipped_message_keys = snapshot.skipped_message_keys
+        state.received_ids = snapshot.received_ids
+        state.session_version = snapshot.session_version
+
     def ratchet_encrypt(self, plaintext: bytes) -> RatchetWireMessage:
         """
         Encrypt (send). Spec: 3.1 Encrypt.
@@ -350,6 +390,14 @@ class DoubleRatchetEngine:
         return RatchetWireMessage(header=header, ciphertext=ciphertext, nonce=nonce)
 
     def ratchet_decrypt(self, msg: RatchetWireMessage) -> bytes:
+        snapshot = self._snapshot_state()
+        try:
+            return self._ratchet_decrypt_inner(msg)
+        except Exception:
+            self._restore_state(snapshot)
+            raise
+
+    def _ratchet_decrypt_inner(self, msg: RatchetWireMessage) -> bytes:
         """
         Decrypt (receive). Spec: 3.2 (same DH) and 3.3 (new DH ratchet).
 

@@ -78,6 +78,32 @@ class SessionManager:
             raise KeyError(f"No session for peer {peer_id!r}")
         return ctx
 
+    def _snapshot_guards(
+        self,
+        ctx: SessionContext,
+    ) -> Tuple[set[Tuple[bytes, bytes, int]], Dict[bytes, int], ForkDetectionState]:
+        return (
+            set(ctx.replay_cache.seen),
+            dict(ctx.replay_cache.highest_by_ratchet),
+            ForkDetectionState(
+                last_message_number=ctx.fork_state.last_message_number,
+                last_previous_chain_length=ctx.fork_state.last_previous_chain_length,
+                last_ratchet_pub=ctx.fork_state.last_ratchet_pub,
+            ),
+        )
+
+    def _restore_guards(
+        self,
+        ctx: SessionContext,
+        snapshot: Tuple[set[Tuple[bytes, bytes, int]], Dict[bytes, int], ForkDetectionState],
+    ) -> None:
+        seen, highest_by_ratchet, fork_state = snapshot
+        ctx.replay_cache.seen = seen
+        ctx.replay_cache.highest_by_ratchet = highest_by_ratchet
+        ctx.fork_state.last_message_number = fork_state.last_message_number
+        ctx.fork_state.last_previous_chain_length = fork_state.last_previous_chain_length
+        ctx.fork_state.last_ratchet_pub = fork_state.last_ratchet_pub
+
     def encrypt_for(self, peer_id: bytes, plaintext: bytes) -> ProtocolEnvelope:
         ctx = self._get_ctx(peer_id)
         em = ctx.ratchet.encrypt(plaintext)
@@ -97,6 +123,7 @@ class SessionManager:
 
     def decrypt_from(self, peer_id: bytes, env: ProtocolEnvelope) -> bytes:
         ctx = self._get_ctx(peer_id)
+        guard_snapshot = self._snapshot_guards(ctx)
 
         # Replay protection first.
         if not ctx.replay_cache.accept(env):
@@ -120,7 +147,11 @@ class SessionManager:
             n=env.message_number,
         )
         em = EncryptedMessage(header=header, ciphertext=env.ciphertext)
-        return ctx.ratchet.decrypt(em)
+        try:
+            return ctx.ratchet.decrypt(em)
+        except Exception:
+            self._restore_guards(ctx, guard_snapshot)
+            raise
 
     # ---- sealed sender ----
 
@@ -182,6 +213,7 @@ class SessionManager:
                 nonce=b"",
                 meta={},
             )
+            guard_snapshot = self._snapshot_guards(ctx)
             if not ctx.replay_cache.accept(syn):
                 mark_for_reset(ctx.reset_state, "replay-detected")
                 raise ValueError("replayed or stale sealed envelope")
@@ -193,9 +225,13 @@ class SessionManager:
                 pn=inner.pn,
                 n=inner.n,
             )
-            plaintext = ctx.ratchet.decrypt(
-                EncryptedMessage(header=header, ciphertext=inner.ciphertext)
-            )
+            try:
+                plaintext = ctx.ratchet.decrypt(
+                    EncryptedMessage(header=header, ciphertext=inner.ciphertext)
+                )
+            except Exception:
+                self._restore_guards(ctx, guard_snapshot)
+                raise
             return (peer_id, plaintext)
         raise ValueError(
             "sealed payload could not be decrypted with any session"
