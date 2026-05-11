@@ -137,6 +137,24 @@ def test_corrupted_ciphertext_rejected() -> None:
         bob.ratchet_decrypt(tampered)
 
 
+def test_failed_decrypt_does_not_advance_state() -> None:
+    """A tampered message must not burn the message key for the valid packet."""
+    alice, bob = _make_pair()
+    wire = alice.ratchet_encrypt(b"recoverable")
+    bad_ct = bytearray(wire.ciphertext)
+    bad_ct[0] ^= 0x01
+    tampered = RatchetWireMessage(
+        header=wire.header,
+        ciphertext=bytes(bad_ct),
+        nonce=wire.nonce,
+    )
+
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.ratchet_decrypt(wire) == b"recoverable"
+
+
 def test_invalid_header_rejected() -> None:
     """wire_message_from_dict rejects missing or invalid header fields."""
     with pytest.raises(InvalidHeaderError):

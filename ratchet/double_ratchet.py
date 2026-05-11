@@ -122,7 +122,76 @@ class DoubleRatchet:
 
         return EncryptedMessage(header=header, ciphertext=ciphertext)
 
+    def _snapshot_state(self) -> Tuple[
+        bytes,
+        bytes,
+        Optional[bytes],
+        Optional[bytes],
+        Optional[bytes],
+        int,
+        int,
+        int,
+        dict[Tuple[bytes, int], bytes],
+    ]:
+        return (
+            bytes(self.state.root_key),
+            bytes(self.state.dhs),
+            bytes(self.state.dhr) if self.state.dhr is not None else None,
+            bytes(self.state.ck_s) if self.state.ck_s is not None else None,
+            bytes(self.state.ck_r) if self.state.ck_r is not None else None,
+            self.state.Ns,
+            self.state.Nr,
+            self.state.PN,
+            {
+                (bytes(ratchet_pub), msg_num): bytes(key)
+                for (ratchet_pub, msg_num), key in self.state.skipped_keys._store.items()
+            },
+        )
+
+    def _restore_state(
+        self,
+        snapshot: Tuple[
+            bytes,
+            bytes,
+            Optional[bytes],
+            Optional[bytes],
+            Optional[bytes],
+            int,
+            int,
+            int,
+            dict[Tuple[bytes, int], bytes],
+        ],
+    ) -> None:
+        (
+            root_key,
+            dhs_private,
+            dhr,
+            ck_s,
+            ck_r,
+            ns,
+            nr,
+            pn,
+            skipped_store,
+        ) = snapshot
+        self.state.root_key = root_key
+        self.state.dhs = X25519PrivateKey(dhs_private)
+        self.state.dhr = dhr
+        self.state.ck_s = ck_s
+        self.state.ck_r = ck_r
+        self.state.Ns = ns
+        self.state.Nr = nr
+        self.state.PN = pn
+        self.state.skipped_keys._store = skipped_store
+
     def decrypt(self, message: EncryptedMessage, ad: bytes = b"") -> bytes:
+        snapshot = self._snapshot_state()
+        try:
+            return self._decrypt_inner(message, ad)
+        except Exception:
+            self._restore_state(snapshot)
+            raise
+
+    def _decrypt_inner(self, message: EncryptedMessage, ad: bytes = b"") -> bytes:
         """
         Decrypt a message, handling out-of-order delivery and skipped keys.
         """
