@@ -306,6 +306,58 @@ class DoubleRatchetState:
         return bytes(X25519PrivateKey(self.dhs_private).public_key)
 
 
+def _clone_skipped_message_keys(source: SkippedMessageKeys) -> SkippedMessageKeys:
+    cloned = SkippedMessageKeys(max_keys=source.max_keys)
+    cloned._store = OrderedDict(
+        ((bytes(dh), n), bytes(key)) for (dh, n), key in source._store.items()
+    )
+    return cloned
+
+
+def _clone_received_ids(source: ReceivedIdsStore) -> ReceivedIdsStore:
+    cloned = ReceivedIdsStore(max_size=source.max_size)
+    cloned._order = OrderedDict(
+        ((bytes(dh), n), None) for (dh, n) in source._order.keys()
+    )
+    return cloned
+
+
+def _clone_state(source: DoubleRatchetState) -> DoubleRatchetState:
+    return DoubleRatchetState(
+        root_key=bytes(source.root_key),
+        sending_chain_key=(
+            None if source.sending_chain_key is None else bytes(source.sending_chain_key)
+        ),
+        receiving_chain_key=(
+            None
+            if source.receiving_chain_key is None
+            else bytes(source.receiving_chain_key)
+        ),
+        dhs_private=None if source.dhs_private is None else bytes(source.dhs_private),
+        dhr=None if source.dhr is None else bytes(source.dhr),
+        Ns=source.Ns,
+        Nr=source.Nr,
+        PN=source.PN,
+        skipped_message_keys=_clone_skipped_message_keys(source.skipped_message_keys),
+        received_ids=_clone_received_ids(source.received_ids),
+        session_version=source.session_version,
+    )
+
+
+def _commit_state(target: DoubleRatchetState, source: DoubleRatchetState) -> None:
+    target.root_key = source.root_key
+    target.sending_chain_key = source.sending_chain_key
+    target.receiving_chain_key = source.receiving_chain_key
+    target.dhs_private = source.dhs_private
+    target.dhr = source.dhr
+    target.Ns = source.Ns
+    target.Nr = source.Nr
+    target.PN = source.PN
+    target.skipped_message_keys = source.skipped_message_keys
+    target.received_ids = source.received_ids
+    target.session_version = source.session_version
+
+
 class DoubleRatchetEngine:
     """
     Double Ratchet encrypt/decrypt with DH ratchet steps and skipped keys.
@@ -350,6 +402,20 @@ class DoubleRatchetEngine:
         return RatchetWireMessage(header=header, ciphertext=ciphertext, nonce=nonce)
 
     def ratchet_decrypt(self, msg: RatchetWireMessage) -> bytes:
+        """Decrypt a message transactionally; failed authentication leaves state unchanged."""
+        original_state = self._state
+        working_state = _clone_state(original_state)
+        self._state = working_state
+        try:
+            plaintext = self._ratchet_decrypt_mutating(msg)
+        except BaseException:
+            self._state = original_state
+            raise
+        _commit_state(original_state, working_state)
+        self._state = original_state
+        return plaintext
+
+    def _ratchet_decrypt_mutating(self, msg: RatchetWireMessage) -> bytes:
         """
         Decrypt (receive). Spec: 3.2 (same DH) and 3.3 (new DH ratchet).
 
