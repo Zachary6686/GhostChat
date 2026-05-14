@@ -15,7 +15,7 @@ from server.websocket_server import (
     _ephemeral_pubs,
     _pending_inits,
     app,
-)
+)  # noqa: E402
 
 
 def _clear_server_state() -> None:

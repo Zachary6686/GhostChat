@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from nacl.public import PrivateKey as X25519PrivateKey, PublicKey as X25519PublicKey, Box
