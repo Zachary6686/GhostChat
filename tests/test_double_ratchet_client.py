@@ -137,6 +137,44 @@ def test_corrupted_ciphertext_rejected() -> None:
         bob.ratchet_decrypt(tampered)
 
 
+def test_corrupted_ciphertext_does_not_consume_message_key() -> None:
+    """Failed authentication must not advance Nr or burn the message key."""
+    alice, bob = _make_pair()
+    wire = alice.ratchet_encrypt(b"secret")
+    bad_ct = bytearray(wire.ciphertext)
+    bad_ct[0] ^= 0x01
+    tampered = RatchetWireMessage(
+        header=wire.header,
+        ciphertext=bytes(bad_ct),
+        nonce=wire.nonce,
+    )
+
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.ratchet_decrypt(wire) == b"secret"
+
+
+def test_corrupted_skipped_message_does_not_delete_skipped_key() -> None:
+    """A failed skipped-key decrypt must leave the skipped key retryable."""
+    alice, bob = _make_pair()
+    w0 = alice.ratchet_encrypt(b"m0")
+    w1 = alice.ratchet_encrypt(b"m1")
+    assert bob.ratchet_decrypt(w1) == b"m1"
+
+    bad_ct = bytearray(w0.ciphertext)
+    bad_ct[0] ^= 0x01
+    tampered = RatchetWireMessage(
+        header=w0.header,
+        ciphertext=bytes(bad_ct),
+        nonce=w0.nonce,
+    )
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.ratchet_decrypt(w0) == b"m0"
+
+
 def test_invalid_header_rejected() -> None:
     """wire_message_from_dict rejects missing or invalid header fields."""
     with pytest.raises(InvalidHeaderError):
@@ -443,6 +481,26 @@ def test_pn_updated_on_ratchet_turn() -> None:
     alice.ratchet_decrypt(reply)
     alice_next = alice.ratchet_encrypt(b"a4")
     assert alice_next.header.pn == 3  # Alice's previous sending chain had 3 messages
+
+
+def test_late_old_chain_message_decrypts_after_dh_ratchet() -> None:
+    """A DH ratchet must cache old-chain keys up to header.pn for late packets."""
+    alice, bob = _make_pair()
+    w0 = alice.ratchet_encrypt(b"a0")
+    w1 = alice.ratchet_encrypt(b"a1")
+    w2 = alice.ratchet_encrypt(b"a2")
+
+    assert bob.ratchet_decrypt(w0) == b"a0"
+    assert bob.ratchet_decrypt(w1) == b"a1"
+
+    reply = bob.ratchet_encrypt(b"b0")
+    assert alice.ratchet_decrypt(reply) == b"b0"
+
+    new_chain = alice.ratchet_encrypt(b"a3")
+    assert new_chain.header.pn == 3
+    assert bob.ratchet_decrypt(new_chain) == b"a3"
+
+    assert bob.ratchet_decrypt(w2) == b"a2"
 
 
 def test_decrypt_stale_skipped_key_fails_as_duplicate() -> None:

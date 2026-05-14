@@ -352,6 +352,19 @@ class DoubleRatchetEngine:
     def ratchet_decrypt(self, msg: RatchetWireMessage) -> bytes:
         """
         Decrypt (receive). Spec: 3.2 (same DH) and 3.3 (new DH ratchet).
+        """
+
+        snapshot = self._snapshot_state()
+        try:
+            return self._ratchet_decrypt_in_place(msg)
+        except Exception:
+            self._restore_state(snapshot)
+            raise
+
+    def _ratchet_decrypt_in_place(self, msg: RatchetWireMessage) -> bytes:
+        """
+        Decrypt (receive), mutating state only after the public wrapper has
+        captured a rollback snapshot.
 
         Preconditions: Valid header (dh 32 bytes, n >= 0, nonce 12 bytes).
         Steps (order matters):
@@ -400,10 +413,10 @@ class DoubleRatchetEngine:
         if state.dhr is None and state.receiving_chain_key is not None and state.sending_chain_key is None:
             state.dhr = h.dh
         elif state.dhr is None and state.sending_chain_key is not None:
-            self._skip_receiving_until(state.Nr)
+            self._skip_receiving_until(h.pn)
             self._dh_ratchet_receive(h.dh)
         elif state.receiving_chain_key is None and state.dhr is None:
-            self._skip_receiving_until(state.Nr)
+            self._skip_receiving_until(h.pn)
             self._dh_ratchet_receive_first(h.dh)
         elif state.receiving_chain_key is None and state.dhr is not None and h.dh == state.dhr:
             peer_pub = X25519PublicKey(state.dhr)
@@ -412,7 +425,7 @@ class DoubleRatchetEngine:
             state.root_key = rk
             state.receiving_chain_key = ck_r
         if state.dhr is not None and h.dh != state.dhr:
-            self._skip_receiving_until(state.Nr)
+            self._skip_receiving_until(h.pn)
             self._dh_ratchet_receive(h.dh)
         if h.n < state.Nr:
             raise DuplicateMessageError("Message number already processed (replay)")
@@ -437,6 +450,46 @@ class DoubleRatchetEngine:
             raise DecryptionError("AEAD verification failed") from e
         except Exception as e:
             raise DecryptionError("AEAD verification failed") from e
+
+    def _snapshot_state(self) -> tuple[object, ...]:
+        state = self._state
+        return (
+            state.root_key,
+            state.sending_chain_key,
+            state.receiving_chain_key,
+            state.dhs_private,
+            state.dhr,
+            state.Ns,
+            state.Nr,
+            state.PN,
+            OrderedDict(state.skipped_message_keys._store),
+            OrderedDict(state.received_ids._order),
+        )
+
+    def _restore_state(self, snapshot: tuple[object, ...]) -> None:
+        (
+            root_key,
+            sending_chain_key,
+            receiving_chain_key,
+            dhs_private,
+            dhr,
+            ns,
+            nr,
+            pn,
+            skipped_store,
+            received_order,
+        ) = snapshot
+        state = self._state
+        state.root_key = root_key  # type: ignore[assignment]
+        state.sending_chain_key = sending_chain_key  # type: ignore[assignment]
+        state.receiving_chain_key = receiving_chain_key  # type: ignore[assignment]
+        state.dhs_private = dhs_private  # type: ignore[assignment]
+        state.dhr = dhr  # type: ignore[assignment]
+        state.Ns = ns  # type: ignore[assignment]
+        state.Nr = nr  # type: ignore[assignment]
+        state.PN = pn  # type: ignore[assignment]
+        state.skipped_message_keys._store = skipped_store  # type: ignore[assignment]
+        state.received_ids._order = received_order  # type: ignore[assignment]
 
     def _skip_receiving_until(self, until: int) -> None:
         """

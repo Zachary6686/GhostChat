@@ -126,6 +126,41 @@ def test_end_to_end_via_relay_router() -> None:
     assert plaintext == b"hello via relay"
 
 
+def test_failed_protocol_decrypt_does_not_consume_envelope() -> None:
+    alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
+
+    env = alice_mgr.encrypt_for(peer_id, b"retry me")
+    tampered = ProtocolEnvelope(
+        version=env.version,
+        session_id=env.session_id,
+        sender_ratchet_key=env.sender_ratchet_key,
+        message_number=env.message_number,
+        previous_chain_length=env.previous_chain_length,
+        ciphertext=bytes([env.ciphertext[0] ^ 0x01]) + env.ciphertext[1:],
+        nonce=env.nonce,
+        meta=env.meta,
+    )
+
+    try:
+        bob_mgr.decrypt_from(peer_id, tampered)
+    except Exception:
+        pass
+    else:  # pragma: no cover - defensive
+        raise AssertionError("Expected tampered envelope to fail")
+
+    assert bob_mgr.decrypt_from(peer_id, env) == b"retry me"
+
+
+def test_protocol_allows_out_of_order_same_chain_delivery() -> None:
+    alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
+
+    env0 = alice_mgr.encrypt_for(peer_id, b"m0")
+    env1 = alice_mgr.encrypt_for(peer_id, b"m1")
+
+    assert bob_mgr.decrypt_from(peer_id, env1) == b"m1"
+    assert bob_mgr.decrypt_from(peer_id, env0) == b"m0"
+
+
 def test_sealed_sender_via_relay_router() -> None:
     """
     Sealed sender flow through relay: outer envelope has only recipient_locator

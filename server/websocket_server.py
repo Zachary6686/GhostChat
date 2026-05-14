@@ -98,12 +98,18 @@ async def websocket_relay(websocket: WebSocket) -> None:
                 elif typ == "upload_bundle":
                     username_b = data.get("username")
                     bundle = data.get("bundle")
+                    if username is None:
+                        await _send_json(websocket, {"type": "error", "message": "register first"})
+                        continue
                     if not username_b or not isinstance(username_b, str):
                         await _send_json(websocket, {"type": "error", "message": "missing username"})
                         continue
                     username_b = username_b.strip()
                     if not username_b:
                         await _send_json(websocket, {"type": "error", "message": "empty username"})
+                        continue
+                    if username_b != username:
+                        await _send_json(websocket, {"type": "error", "message": "username mismatch"})
                         continue
                     if bundle is None or not isinstance(bundle, dict):
                         await _send_json(websocket, {"type": "error", "message": "missing or invalid bundle"})

@@ -24,21 +24,26 @@ def _env(session_id: bytes, rk: bytes, n: int) -> ProtocolEnvelope:
     )
 
 
-def test_replay_cache_rejects_duplicates_and_stale() -> None:
+def test_replay_cache_rejects_exact_duplicates_only() -> None:
     cache = SessionReplayCache(max_entries=4)
     env1 = _env(b"s", b"rk", 1)
     env2 = _env(b"s", b"rk", 2)
-    env3 = _env(b"s", b"rk", 1)  # duplicate number
+    env3 = _env(b"s", b"rk", 1)
 
     assert cache.accept(env1)
     assert cache.accept(env2)
-    assert not cache.accept(env3)  # duplicate / stale
+    assert not cache.accept(env3)
+
+    # Lower unseen numbers can be legitimate out-of-order packets; the
+    # double ratchet decides whether they are decryptable.
+    assert cache.accept(_env(b"s", b"rk", 0))
 
 
 def test_replay_cache_bounded_capacity() -> None:
     cache = SessionReplayCache(max_entries=2)
     assert cache.accept(_env(b"s", b"rk", 1))
     assert cache.accept(_env(b"s", b"rk", 2))
-    # New, distinct envelope when at capacity should be rejected.
-    assert not cache.accept(_env(b"s", b"rk", 3))
+    # New, distinct envelopes evict the oldest entry instead of wedging the session.
+    assert cache.accept(_env(b"s", b"rk", 3))
+    assert cache.accept(_env(b"s", b"rk", 1))
 

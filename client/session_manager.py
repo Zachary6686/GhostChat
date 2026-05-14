@@ -9,6 +9,7 @@ detection, and session reset state. Handshake and identity management
 are intentionally simplified for tests.
 """
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Dict, Tuple
 
@@ -98,12 +99,13 @@ class SessionManager:
     def decrypt_from(self, peer_id: bytes, env: ProtocolEnvelope) -> bytes:
         ctx = self._get_ctx(peer_id)
 
-        # Replay protection first.
-        if not ctx.replay_cache.accept(env):
+        # Replay protection first, but only record after authentication.
+        if not ctx.replay_cache.check(env):
             mark_for_reset(ctx.reset_state, "replay-detected")
             raise ValueError("replayed or stale envelope")
 
         # Fork detection next.
+        fork_snapshot = deepcopy(ctx.fork_state)
         if detect_fork(
             ctx.fork_state,
             env.sender_ratchet_key,
@@ -120,7 +122,13 @@ class SessionManager:
             n=env.message_number,
         )
         em = EncryptedMessage(header=header, ciphertext=env.ciphertext)
-        return ctx.ratchet.decrypt(em)
+        try:
+            plaintext = ctx.ratchet.decrypt(em)
+        except Exception:
+            ctx.fork_state = fork_snapshot
+            raise
+        ctx.replay_cache.record(env)
+        return plaintext
 
     # ---- sealed sender ----
 
@@ -182,9 +190,10 @@ class SessionManager:
                 nonce=b"",
                 meta={},
             )
-            if not ctx.replay_cache.accept(syn):
+            if not ctx.replay_cache.check(syn):
                 mark_for_reset(ctx.reset_state, "replay-detected")
                 raise ValueError("replayed or stale sealed envelope")
+            fork_snapshot = deepcopy(ctx.fork_state)
             if detect_fork(ctx.fork_state, inner.dh_pub, inner.n, inner.pn):
                 mark_for_reset(ctx.reset_state, "fork-detected")
                 raise ValueError("fork detected")
@@ -193,9 +202,14 @@ class SessionManager:
                 pn=inner.pn,
                 n=inner.n,
             )
-            plaintext = ctx.ratchet.decrypt(
-                EncryptedMessage(header=header, ciphertext=inner.ciphertext)
-            )
+            try:
+                plaintext = ctx.ratchet.decrypt(
+                    EncryptedMessage(header=header, ciphertext=inner.ciphertext)
+                )
+            except Exception:
+                ctx.fork_state = fork_snapshot
+                raise
+            ctx.replay_cache.record(syn)
             return (peer_id, plaintext)
         raise ValueError(
             "sealed payload could not be decrypted with any session"

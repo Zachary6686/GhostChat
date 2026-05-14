@@ -127,6 +127,14 @@ class DoubleRatchet:
         Decrypt a message, handling out-of-order delivery and skipped keys.
         """
 
+        snapshot = self._snapshot_state()
+        try:
+            return self._decrypt_in_place(message, ad)
+        except Exception:
+            self._restore_state(snapshot)
+            raise
+
+    def _decrypt_in_place(self, message: EncryptedMessage, ad: bytes = b"") -> bytes:
         h = message.header
 
         # 1. Skipped message keys first.
@@ -145,7 +153,7 @@ class DoubleRatchet:
 
         # 2b. Maybe advance the DH ratchet if the DH public key changed.
         if self.state.dhr is None or h.dh_pub != self.state.dhr:
-            self._skip_message_keys(until=self.state.Nr)
+            self._skip_message_keys(until=h.pn)
             self._dh_ratchet_receive(h.dh_pub)
 
         # 3. Now derive/skip within the current receiving chain.
@@ -163,6 +171,42 @@ class DoubleRatchet:
         return _aead_decrypt(mk, nonce, message.ciphertext, ad)
 
     # --- internal helpers ---
+
+    def _snapshot_state(self) -> tuple[object, ...]:
+        state = self.state
+        return (
+            state.root_key,
+            state.dhs,
+            state.dhr,
+            state.ck_s,
+            state.ck_r,
+            state.Ns,
+            state.Nr,
+            state.PN,
+            dict(state.skipped_keys._store),
+        )
+
+    def _restore_state(self, snapshot: tuple[object, ...]) -> None:
+        (
+            root_key,
+            dhs,
+            dhr,
+            ck_s,
+            ck_r,
+            ns,
+            nr,
+            pn,
+            skipped_store,
+        ) = snapshot
+        self.state.root_key = root_key  # type: ignore[assignment]
+        self.state.dhs = dhs  # type: ignore[assignment]
+        self.state.dhr = dhr  # type: ignore[assignment]
+        self.state.ck_s = ck_s  # type: ignore[assignment]
+        self.state.ck_r = ck_r  # type: ignore[assignment]
+        self.state.Ns = ns  # type: ignore[assignment]
+        self.state.Nr = nr  # type: ignore[assignment]
+        self.state.PN = pn  # type: ignore[assignment]
+        self.state.skipped_keys._store = skipped_store  # type: ignore[assignment]
 
     def _skip_message_keys(self, *, until: int) -> None:
         """
