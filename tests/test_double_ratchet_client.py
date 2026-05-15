@@ -14,6 +14,7 @@ import sys
 import tempfile
 
 import pytest
+from nacl.public import PrivateKey as X25519PrivateKey
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -21,6 +22,7 @@ if str(ROOT) not in sys.path:
 
 from client.crypto.double_ratchet import (
     DoubleRatchetEngine,
+    MAX_SKIP_DISTANCE,
     ReceivedIdsStore,
     create_initial_state,
 )
@@ -37,6 +39,7 @@ from client.crypto.ratchet_errors import (
     InvalidHeaderError,
     SessionRollbackError,
     SkippedKeyStorageLimitError,
+    SkipDistanceExceededError,
 )
 from client.session_store import load_session, save_session, state_from_dict, state_to_dict
 
@@ -277,6 +280,62 @@ def test_ciphertext_tampering_rejected() -> None:
     )
     with pytest.raises(DecryptionError):
         bob.ratchet_decrypt(tampered)
+
+
+def test_failed_current_chain_decrypt_does_not_advance_receiver_state() -> None:
+    """A corrupted in-order delivery must not consume the receiver's message key."""
+    alice, bob = _make_pair()
+    wire = alice.ratchet_encrypt(b"recoverable")
+    bad_ct = bytearray(wire.ciphertext)
+    bad_ct[0] ^= 0x01
+    tampered = RatchetWireMessage(
+        header=wire.header,
+        ciphertext=bytes(bad_ct),
+        nonce=wire.nonce,
+    )
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.ratchet_decrypt(wire) == b"recoverable"
+
+
+def test_failed_skipped_key_decrypt_does_not_burn_skipped_key() -> None:
+    """A corrupted out-of-order delivery must not delete the stored skipped key."""
+    alice, bob = _make_pair()
+    w0 = alice.ratchet_encrypt(b"m0")
+    w1 = alice.ratchet_encrypt(b"m1")
+    assert bob.ratchet_decrypt(w1) == b"m1"
+
+    bad_ct = bytearray(w0.ciphertext)
+    bad_ct[0] ^= 0x01
+    tampered = RatchetWireMessage(
+        header=w0.header,
+        ciphertext=bytes(bad_ct),
+        nonce=w0.nonce,
+    )
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.ratchet_decrypt(w0) == b"m0"
+
+
+def test_rejected_new_dh_skip_distance_does_not_desync_session() -> None:
+    """Rejecting an oversized gap for a new DH ratchet must not commit that ratchet step."""
+    alice, bob = _make_pair()
+    w0 = alice.ratchet_encrypt(b"m0")
+    assert bob.ratchet_decrypt(w0) == b"m0"
+
+    fake_dh = bytes(X25519PrivateKey.generate().public_key)
+    oversized_gap = RatchetWireMessage(
+        header=RatchetMessageHeader(dh=fake_dh, n=MAX_SKIP_DISTANCE + 1, pn=0),
+        ciphertext=w0.ciphertext,
+        nonce=w0.nonce,
+    )
+    with pytest.raises(SkipDistanceExceededError):
+        bob.ratchet_decrypt(oversized_gap)
+
+    w1 = alice.ratchet_encrypt(b"m1")
+    assert bob.ratchet_decrypt(w1) == b"m1"
 
 
 def test_replay_after_serialization_roundtrip_rejected() -> None:

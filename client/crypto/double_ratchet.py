@@ -25,6 +25,7 @@ Key invariants (security-critical)
 from __future__ import annotations
 
 import base64
+import copy
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -318,6 +319,20 @@ class DoubleRatchetEngine:
     def state(self) -> DoubleRatchetState:
         return self._state
 
+    def _restore_state(self, snapshot: DoubleRatchetState) -> None:
+        state = self._state
+        state.root_key = snapshot.root_key
+        state.sending_chain_key = snapshot.sending_chain_key
+        state.receiving_chain_key = snapshot.receiving_chain_key
+        state.dhs_private = snapshot.dhs_private
+        state.dhr = snapshot.dhr
+        state.Ns = snapshot.Ns
+        state.Nr = snapshot.Nr
+        state.PN = snapshot.PN
+        state.skipped_message_keys = snapshot.skipped_message_keys
+        state.received_ids = snapshot.received_ids
+        state.session_version = snapshot.session_version
+
     def ratchet_encrypt(self, plaintext: bytes) -> RatchetWireMessage:
         """
         Encrypt (send). Spec: 3.1 Encrypt.
@@ -363,22 +378,70 @@ class DoubleRatchetEngine:
           6. Advance receiving chain to n (store skipped keys for Nr..n-1), derive mk for n, decrypt with AAD, add (dh,n) to received_ids, Nr = n+1.
         Postconditions: Message key used at most once; Nr increases; AAD tampering yields DecryptionError.
         """
+        snapshot = copy.deepcopy(self._state)
         state = self._state
         h = msg.header
-        if len(h.dh) != DH_PUB_LEN:
-            raise DecryptionError("Invalid header: dh must be 32 bytes")
-        if h.n < 0:
-            raise DecryptionError("Invalid header: message number must be non-negative")
-        if len(msg.nonce) != AAD_NONCE_LEN:
-            raise DecryptionError("Invalid message: nonce must be 12 bytes")
+        try:
+            if len(h.dh) != DH_PUB_LEN:
+                raise DecryptionError("Invalid header: dh must be 32 bytes")
+            if h.n < 0:
+                raise DecryptionError("Invalid header: message number must be non-negative")
+            if len(msg.nonce) != AAD_NONCE_LEN:
+                raise DecryptionError("Invalid message: nonce must be 12 bytes")
 
-        # Replay: (dh, n) already accepted. received_ids is bounded FIFO; very old ids may be evicted.
-        if state.received_ids.contains(h.dh, h.n):
-            raise DuplicateMessageError("Message already processed (replay or duplicate header)")
+            # Replay: (dh, n) already accepted. received_ids is bounded FIFO; very old ids may be evicted.
+            if state.received_ids.contains(h.dh, h.n):
+                raise DuplicateMessageError("Message already processed (replay or duplicate header)")
 
-        # Same DH ratchet, out-of-order: use skipped key if we have it.
-        if state.skipped_message_keys.has(h.dh, h.n):
-            mk = state.skipped_message_keys.pop(h.dh, h.n)
+            # Same DH ratchet, out-of-order: use skipped key if we have it.
+            if state.skipped_message_keys.has(h.dh, h.n):
+                mk = state.skipped_message_keys.pop(h.dh, h.n)
+                nonce = _message_key_to_nonce(mk, h.n)
+                if msg.nonce != nonce:
+                    raise DecryptionError("Nonce mismatch (tampering or corruption)")
+                ad = _header_aad(h)
+                try:
+                    plaintext = aead_decrypt(mk, msg.ciphertext, nonce, ad)
+                    state.received_ids.add(h.dh, h.n)
+                    return plaintext
+                except InvalidTag as e:
+                    raise DecryptionError("AEAD verification failed (skipped-key path)") from e
+                except Exception as e:
+                    raise DecryptionError("AEAD verification failed (skipped-key path)") from e
+
+            # Same ratchet, n already consumed (replay).
+            if state.dhr is not None and h.dh == state.dhr and h.n < state.Nr:
+                raise DuplicateMessageError("Message number already processed (replay)")
+
+            # New DH or bootstrap: ensure dhr and receiving_chain_key are set (spec 3.3).
+            if state.dhr is None and state.receiving_chain_key is not None and state.sending_chain_key is None:
+                state.dhr = h.dh
+            elif state.dhr is None and state.sending_chain_key is not None:
+                self._skip_receiving_until(state.Nr)
+                self._dh_ratchet_receive(h.dh)
+            elif state.receiving_chain_key is None and state.dhr is None:
+                self._skip_receiving_until(state.Nr)
+                self._dh_ratchet_receive_first(h.dh)
+            elif state.receiving_chain_key is None and state.dhr is not None and h.dh == state.dhr:
+                peer_pub = X25519PublicKey(state.dhr)
+                dhs = X25519PrivateKey(state.dhs_private)
+                rk, ck_r = kdf_root(state.root_key, _dh(dhs, peer_pub))
+                state.root_key = rk
+                state.receiving_chain_key = ck_r
+            if state.dhr is not None and h.dh != state.dhr:
+                self._skip_receiving_until(state.Nr)
+                self._dh_ratchet_receive(h.dh)
+            if h.n < state.Nr:
+                raise DuplicateMessageError("Message number already processed (replay)")
+            # Skip distance: refuse to derive keys for n too far ahead of Nr (DoS bound).
+            if state.receiving_chain_key is not None and h.n - state.Nr > MAX_SKIP_DISTANCE:
+                raise SkipDistanceExceededError(
+                    f"Skip distance {h.n - state.Nr} exceeds MAX_SKIP_DISTANCE={MAX_SKIP_DISTANCE}"
+                )
+            # Advance receiving chain to n, storing skipped keys for out-of-order delivery.
+            self._skip_receiving_until(h.n)
+            state.receiving_chain_key, mk = kdf_chain(state.receiving_chain_key)
+            state.Nr += 1
             nonce = _message_key_to_nonce(mk, h.n)
             if msg.nonce != nonce:
                 raise DecryptionError("Nonce mismatch (tampering or corruption)")
@@ -388,55 +451,12 @@ class DoubleRatchetEngine:
                 state.received_ids.add(h.dh, h.n)
                 return plaintext
             except InvalidTag as e:
-                raise DecryptionError("AEAD verification failed (skipped-key path)") from e
+                raise DecryptionError("AEAD verification failed") from e
             except Exception as e:
-                raise DecryptionError("AEAD verification failed (skipped-key path)") from e
-
-        # Same ratchet, n already consumed (replay).
-        if state.dhr is not None and h.dh == state.dhr and h.n < state.Nr:
-            raise DuplicateMessageError("Message number already processed (replay)")
-
-        # New DH or bootstrap: ensure dhr and receiving_chain_key are set (spec 3.3).
-        if state.dhr is None and state.receiving_chain_key is not None and state.sending_chain_key is None:
-            state.dhr = h.dh
-        elif state.dhr is None and state.sending_chain_key is not None:
-            self._skip_receiving_until(state.Nr)
-            self._dh_ratchet_receive(h.dh)
-        elif state.receiving_chain_key is None and state.dhr is None:
-            self._skip_receiving_until(state.Nr)
-            self._dh_ratchet_receive_first(h.dh)
-        elif state.receiving_chain_key is None and state.dhr is not None and h.dh == state.dhr:
-            peer_pub = X25519PublicKey(state.dhr)
-            dhs = X25519PrivateKey(state.dhs_private)
-            rk, ck_r = kdf_root(state.root_key, _dh(dhs, peer_pub))
-            state.root_key = rk
-            state.receiving_chain_key = ck_r
-        if state.dhr is not None and h.dh != state.dhr:
-            self._skip_receiving_until(state.Nr)
-            self._dh_ratchet_receive(h.dh)
-        if h.n < state.Nr:
-            raise DuplicateMessageError("Message number already processed (replay)")
-        # Skip distance: refuse to derive keys for n too far ahead of Nr (DoS bound).
-        if state.receiving_chain_key is not None and h.n - state.Nr > MAX_SKIP_DISTANCE:
-            raise SkipDistanceExceededError(
-                f"Skip distance {h.n - state.Nr} exceeds MAX_SKIP_DISTANCE={MAX_SKIP_DISTANCE}"
-            )
-        # Advance receiving chain to n, storing skipped keys for out-of-order delivery.
-        self._skip_receiving_until(h.n)
-        state.receiving_chain_key, mk = kdf_chain(state.receiving_chain_key)
-        state.Nr += 1
-        nonce = _message_key_to_nonce(mk, h.n)
-        if msg.nonce != nonce:
-            raise DecryptionError("Nonce mismatch (tampering or corruption)")
-        ad = _header_aad(h)
-        try:
-            plaintext = aead_decrypt(mk, msg.ciphertext, nonce, ad)
-            state.received_ids.add(h.dh, h.n)
-            return plaintext
-        except InvalidTag as e:
-            raise DecryptionError("AEAD verification failed") from e
-        except Exception as e:
-            raise DecryptionError("AEAD verification failed") from e
+                raise DecryptionError("AEAD verification failed") from e
+        except Exception:
+            self._restore_state(snapshot)
+            raise
 
     def _skip_receiving_until(self, until: int) -> None:
         """
