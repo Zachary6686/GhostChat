@@ -378,65 +378,111 @@ class DoubleRatchetEngine:
 
         # Same DH ratchet, out-of-order: use skipped key if we have it.
         if state.skipped_message_keys.has(h.dh, h.n):
-            mk = state.skipped_message_keys.pop(h.dh, h.n)
-            nonce = _message_key_to_nonce(mk, h.n)
-            if msg.nonce != nonce:
-                raise DecryptionError("Nonce mismatch (tampering or corruption)")
-            ad = _header_aad(h)
+            snapshot = self._snapshot_state()
             try:
+                mk = state.skipped_message_keys.pop(h.dh, h.n)
+                nonce = _message_key_to_nonce(mk, h.n)
+                if msg.nonce != nonce:
+                    raise DecryptionError("Nonce mismatch (tampering or corruption)")
+                ad = _header_aad(h)
                 plaintext = aead_decrypt(mk, msg.ciphertext, nonce, ad)
                 state.received_ids.add(h.dh, h.n)
                 return plaintext
             except InvalidTag as e:
+                self._restore_state(snapshot)
                 raise DecryptionError("AEAD verification failed (skipped-key path)") from e
+            except DecryptionError:
+                self._restore_state(snapshot)
+                raise
             except Exception as e:
+                self._restore_state(snapshot)
                 raise DecryptionError("AEAD verification failed (skipped-key path)") from e
 
         # Same ratchet, n already consumed (replay).
         if state.dhr is not None and h.dh == state.dhr and h.n < state.Nr:
             raise DuplicateMessageError("Message number already processed (replay)")
 
-        # New DH or bootstrap: ensure dhr and receiving_chain_key are set (spec 3.3).
-        if state.dhr is None and state.receiving_chain_key is not None and state.sending_chain_key is None:
-            state.dhr = h.dh
-        elif state.dhr is None and state.sending_chain_key is not None:
-            self._skip_receiving_until(state.Nr)
-            self._dh_ratchet_receive(h.dh)
-        elif state.receiving_chain_key is None and state.dhr is None:
-            self._skip_receiving_until(state.Nr)
-            self._dh_ratchet_receive_first(h.dh)
-        elif state.receiving_chain_key is None and state.dhr is not None and h.dh == state.dhr:
-            peer_pub = X25519PublicKey(state.dhr)
-            dhs = X25519PrivateKey(state.dhs_private)
-            rk, ck_r = kdf_root(state.root_key, _dh(dhs, peer_pub))
-            state.root_key = rk
-            state.receiving_chain_key = ck_r
-        if state.dhr is not None and h.dh != state.dhr:
-            self._skip_receiving_until(state.Nr)
-            self._dh_ratchet_receive(h.dh)
-        if h.n < state.Nr:
-            raise DuplicateMessageError("Message number already processed (replay)")
-        # Skip distance: refuse to derive keys for n too far ahead of Nr (DoS bound).
-        if state.receiving_chain_key is not None and h.n - state.Nr > MAX_SKIP_DISTANCE:
-            raise SkipDistanceExceededError(
-                f"Skip distance {h.n - state.Nr} exceeds MAX_SKIP_DISTANCE={MAX_SKIP_DISTANCE}"
-            )
-        # Advance receiving chain to n, storing skipped keys for out-of-order delivery.
-        self._skip_receiving_until(h.n)
-        state.receiving_chain_key, mk = kdf_chain(state.receiving_chain_key)
-        state.Nr += 1
-        nonce = _message_key_to_nonce(mk, h.n)
-        if msg.nonce != nonce:
-            raise DecryptionError("Nonce mismatch (tampering or corruption)")
-        ad = _header_aad(h)
+        snapshot = self._snapshot_state()
         try:
+            # New DH or bootstrap: ensure dhr and receiving_chain_key are set (spec 3.3).
+            if state.dhr is None and state.receiving_chain_key is not None and state.sending_chain_key is None:
+                state.dhr = h.dh
+            elif state.dhr is None and state.sending_chain_key is not None:
+                self._skip_receiving_until(state.Nr)
+                self._dh_ratchet_receive(h.dh)
+            elif state.receiving_chain_key is None and state.dhr is None:
+                self._skip_receiving_until(state.Nr)
+                self._dh_ratchet_receive_first(h.dh)
+            elif state.receiving_chain_key is None and state.dhr is not None and h.dh == state.dhr:
+                peer_pub = X25519PublicKey(state.dhr)
+                dhs = X25519PrivateKey(state.dhs_private)
+                rk, ck_r = kdf_root(state.root_key, _dh(dhs, peer_pub))
+                state.root_key = rk
+                state.receiving_chain_key = ck_r
+            if state.dhr is not None and h.dh != state.dhr:
+                self._skip_receiving_until(state.Nr)
+                self._dh_ratchet_receive(h.dh)
+            if h.n < state.Nr:
+                raise DuplicateMessageError("Message number already processed (replay)")
+            # Skip distance: refuse to derive keys for n too far ahead of Nr (DoS bound).
+            if state.receiving_chain_key is not None and h.n - state.Nr > MAX_SKIP_DISTANCE:
+                raise SkipDistanceExceededError(
+                    f"Skip distance {h.n - state.Nr} exceeds MAX_SKIP_DISTANCE={MAX_SKIP_DISTANCE}"
+                )
+            # Advance receiving chain to n, storing skipped keys for out-of-order delivery.
+            self._skip_receiving_until(h.n)
+            state.receiving_chain_key, mk = kdf_chain(state.receiving_chain_key)
+            state.Nr += 1
+            nonce = _message_key_to_nonce(mk, h.n)
+            if msg.nonce != nonce:
+                raise DecryptionError("Nonce mismatch (tampering or corruption)")
+            ad = _header_aad(h)
             plaintext = aead_decrypt(mk, msg.ciphertext, nonce, ad)
             state.received_ids.add(h.dh, h.n)
             return plaintext
         except InvalidTag as e:
+            self._restore_state(snapshot)
             raise DecryptionError("AEAD verification failed") from e
-        except Exception as e:
-            raise DecryptionError("AEAD verification failed") from e
+        except DecryptionError:
+            self._restore_state(snapshot)
+            raise
+        except Exception:
+            self._restore_state(snapshot)
+            raise
+
+    def _snapshot_state(self) -> tuple:
+        state = self._state
+        return (
+            state.root_key,
+            state.sending_chain_key,
+            state.receiving_chain_key,
+            state.dhs_private,
+            state.dhr,
+            state.Ns,
+            state.Nr,
+            state.PN,
+            state.skipped_message_keys._store.copy(),
+            state.received_ids._order.copy(),
+            state.session_version,
+        )
+
+    def _restore_state(self, snapshot: tuple) -> None:
+        state = self._state
+        (
+            state.root_key,
+            state.sending_chain_key,
+            state.receiving_chain_key,
+            state.dhs_private,
+            state.dhr,
+            state.Ns,
+            state.Nr,
+            state.PN,
+            skipped_store,
+            received_ids,
+            state.session_version,
+        ) = snapshot
+        state.skipped_message_keys._store = skipped_store.copy()
+        state.received_ids._order = received_ids.copy()
 
     def _skip_receiving_until(self, until: int) -> None:
         """

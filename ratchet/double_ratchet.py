@@ -131,38 +131,76 @@ class DoubleRatchet:
 
         # 1. Skipped message keys first.
         if self.state.skipped_keys.has(h.dh_pub, h.n):
-            mk = self.state.skipped_keys.pop(h.dh_pub, h.n)
+            snapshot = self._snapshot_state()
+            try:
+                mk = self.state.skipped_keys.pop(h.dh_pub, h.n)
+                nonce = _mk_to_nonce(mk, h.n)
+                return _aead_decrypt(mk, nonce, message.ciphertext, ad)
+            except Exception:
+                self._restore_state(snapshot)
+                raise
+
+        snapshot = self._snapshot_state()
+        try:
+            # 2a. If we have no receiving chain yet but the DH public key matches
+            # our stored DHR, derive the initial receiving chain.
+            if self.state.ck_r is None and self.state.dhr is not None and h.dh_pub == self.state.dhr:
+                peer_pub = X25519PublicKey(self.state.dhr)
+                rk, ck_r = kdf_root(self.state.root_key, _dh(self.state.dhs, peer_pub))
+                self.state.root_key = rk
+                self.state.ck_r = ck_r
+
+            # 2b. Maybe advance the DH ratchet if the DH public key changed.
+            if self.state.dhr is None or h.dh_pub != self.state.dhr:
+                self._skip_message_keys(until=self.state.Nr)
+                self._dh_ratchet_receive(h.dh_pub)
+
+            # 3. Now derive/skip within the current receiving chain.
+            if h.n < self.state.Nr:
+                raise DuplicateMessageError("Message number already processed in this chain")
+
+            # Skip any unseen messages up to n-1, caching their keys.
+            self._skip_message_keys(until=h.n)
+
+            # Derive key for this message.
+            self.state.ck_r, mk = kdf_chain(self.state.ck_r)  # type: ignore[arg-type]
+            self.state.Nr += 1
+
             nonce = _mk_to_nonce(mk, h.n)
             return _aead_decrypt(mk, nonce, message.ciphertext, ad)
-
-        # 2a. If we have no receiving chain yet but the DH public key matches
-        # our stored DHR, derive the initial receiving chain.
-        if self.state.ck_r is None and self.state.dhr is not None and h.dh_pub == self.state.dhr:
-            peer_pub = X25519PublicKey(self.state.dhr)
-            rk, ck_r = kdf_root(self.state.root_key, _dh(self.state.dhs, peer_pub))
-            self.state.root_key = rk
-            self.state.ck_r = ck_r
-
-        # 2b. Maybe advance the DH ratchet if the DH public key changed.
-        if self.state.dhr is None or h.dh_pub != self.state.dhr:
-            self._skip_message_keys(until=self.state.Nr)
-            self._dh_ratchet_receive(h.dh_pub)
-
-        # 3. Now derive/skip within the current receiving chain.
-        if h.n < self.state.Nr:
-            raise DuplicateMessageError("Message number already processed in this chain")
-
-        # Skip any unseen messages up to n-1, caching their keys.
-        self._skip_message_keys(until=h.n)
-
-        # Derive key for this message.
-        self.state.ck_r, mk = kdf_chain(self.state.ck_r)  # type: ignore[arg-type]
-        self.state.Nr += 1
-
-        nonce = _mk_to_nonce(mk, h.n)
-        return _aead_decrypt(mk, nonce, message.ciphertext, ad)
+        except Exception:
+            self._restore_state(snapshot)
+            raise
 
     # --- internal helpers ---
+
+    def _snapshot_state(self) -> tuple:
+        return (
+            self.state.root_key,
+            bytes(self.state.dhs),
+            self.state.dhr,
+            self.state.ck_s,
+            self.state.ck_r,
+            self.state.Ns,
+            self.state.Nr,
+            self.state.PN,
+            self.state.skipped_keys._store.copy(),
+        )
+
+    def _restore_state(self, snapshot: tuple) -> None:
+        (
+            self.state.root_key,
+            dhs_bytes,
+            self.state.dhr,
+            self.state.ck_s,
+            self.state.ck_r,
+            self.state.Ns,
+            self.state.Nr,
+            self.state.PN,
+            skipped_store,
+        ) = snapshot
+        self.state.dhs = X25519PrivateKey(dhs_bytes)
+        self.state.skipped_keys._store = skipped_store.copy()
 
     def _skip_message_keys(self, *, until: int) -> None:
         """

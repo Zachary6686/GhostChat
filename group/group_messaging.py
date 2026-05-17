@@ -61,13 +61,26 @@ class ReplayCache:
     seen: Set[Tuple[int, int]] = field(default_factory=set)
 
     def check_and_mark(self, sender_leaf: int, counter: int) -> bool:
+        if not self.would_accept(sender_leaf, counter):
+            return False
+        self.mark_seen(sender_leaf, counter)
+        return True
+
+    def would_accept(self, sender_leaf: int, counter: int) -> bool:
         key = (sender_leaf, counter)
         if key in self.seen:
             return False
         if len(self.seen) >= self.max_entries:
             return False
-        self.seen.add(key)
         return True
+
+    def mark_seen(self, sender_leaf: int, counter: int) -> None:
+        key = (sender_leaf, counter)
+        if key in self.seen:
+            return
+        if len(self.seen) >= self.max_entries:
+            raise ReplayedGroupMessageError("Group replay cache capacity exceeded")
+        self.seen.add(key)
 
 
 class GroupMessenger:
@@ -130,7 +143,7 @@ class GroupMessenger:
         ):
             raise MembershipError("Unknown sender leaf index")
 
-        if not self._replay_cache.check_and_mark(
+        if not self._replay_cache.would_accept(
             header.sender_leaf_index, header.counter
         ):
             raise ReplayedGroupMessageError("Duplicate group message counter")
@@ -148,5 +161,7 @@ class GroupMessenger:
             + header.counter.to_bytes(8, "big")
             + ad
         )
-        return aead.decrypt(nonce, message.ciphertext, ad_bytes)
+        plaintext = aead.decrypt(nonce, message.ciphertext, ad_bytes)
+        self._replay_cache.mark_seen(header.sender_leaf_index, header.counter)
+        return plaintext
 

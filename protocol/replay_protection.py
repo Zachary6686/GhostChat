@@ -25,10 +25,9 @@ class SessionReplayCache:
     def _make_key(self, env: ProtocolEnvelope) -> CacheKey:
         return (env.session_id, env.sender_ratchet_key, env.message_number)
 
-    def accept(self, env: ProtocolEnvelope) -> bool:
+    def would_accept(self, env: ProtocolEnvelope) -> bool:
         """
-        Return True if this envelope is accepted as fresh; False if it
-        should be treated as a replay or stale.
+        Return True if this envelope is fresh without mutating the cache.
         """
 
         key = self._make_key(env)
@@ -46,8 +45,31 @@ class SessionReplayCache:
         if len(self.seen) >= self.max_entries:
             return False
 
+        return True
+
+    def mark_accepted(self, env: ProtocolEnvelope) -> None:
+        """
+        Commit an already-authenticated envelope to the replay cache.
+        """
+
+        key = self._make_key(env)
+        if key in self.seen:
+            return
+        if len(self.seen) >= self.max_entries:
+            raise ValueError("Replay cache capacity exceeded")
+        last = self.highest_by_ratchet.get(env.sender_ratchet_key)
         self.seen.add(key)
         if last is None or env.message_number > last:
             self.highest_by_ratchet[env.sender_ratchet_key] = env.message_number
+
+    def accept(self, env: ProtocolEnvelope) -> bool:
+        """
+        Return True if this envelope is accepted as fresh; False if it
+        should be treated as a replay or stale.
+        """
+
+        if not self.would_accept(env):
+            return False
+        self.mark_accepted(env)
         return True
 
