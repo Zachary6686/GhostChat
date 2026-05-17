@@ -4,6 +4,9 @@ import os
 import pathlib
 import sys
 
+import pytest
+from cryptography.exceptions import InvalidTag
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -17,7 +20,7 @@ from client.message_api import (
 from client.group_manager import GroupManager
 from client.session_manager import SessionManager
 from group.membership import MembershipController
-from group.group_messaging import GroupMessenger
+from group.group_messaging import GroupMessage, GroupMessenger
 from group.errors import EpochMismatchError, ReplayedGroupMessageError
 from group.state_verification import (
     validate_local_state,
@@ -167,6 +170,28 @@ def test_duplicate_replayed_group_message_rejected() -> None:
         assert False, "Replay should be rejected"
     except ReplayedGroupMessageError:
         pass
+
+
+def test_tampered_group_message_does_not_burn_replay_counter() -> None:
+    """Failed AEAD must not make the authentic group message look replayed."""
+    gid = _rand_id()
+    a, b = os.urandom(32), os.urandom(32)
+    controller = MembershipController.create_group(gid, [a, b])
+    state = controller.state
+    leaf_a = state.members[a].leaf_index
+    leaf_b = state.members[b].leaf_index
+
+    sender = GroupMessenger(state, sender_leaf_index=leaf_a)
+    receiver = GroupMessenger(state, sender_leaf_index=leaf_b)
+    msg = sender.encrypt(b"once")
+    bad_ct = bytearray(msg.ciphertext)
+    bad_ct[0] ^= 0x01
+    tampered = GroupMessage(header=msg.header, ciphertext=bytes(bad_ct))
+
+    with pytest.raises(InvalidTag):
+        receiver.decrypt(tampered)
+
+    assert receiver.decrypt(msg) == b"once"
 
 
 def test_malformed_serialized_group_state_rejected() -> None:

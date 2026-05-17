@@ -4,6 +4,8 @@ import os
 import pathlib
 import sys
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -124,6 +126,28 @@ def test_end_to_end_via_relay_router() -> None:
     received_env = ProtocolEnvelope.from_dict(incoming[0])
     plaintext = bob_mgr.decrypt_from(peer_id, received_env)
     assert plaintext == b"hello via relay"
+
+
+def test_tampered_envelope_does_not_burn_replay_or_ratchet_state() -> None:
+    alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
+    env = alice_mgr.encrypt_for(peer_id, b"authenticated")
+    bad_ct = bytearray(env.ciphertext)
+    bad_ct[0] ^= 0x01
+    tampered = ProtocolEnvelope(
+        version=env.version,
+        session_id=env.session_id,
+        sender_ratchet_key=env.sender_ratchet_key,
+        message_number=env.message_number,
+        previous_chain_length=env.previous_chain_length,
+        ciphertext=bytes(bad_ct),
+        nonce=env.nonce,
+        meta=env.meta,
+    )
+
+    with pytest.raises(Exception):
+        bob_mgr.decrypt_from(peer_id, tampered)
+
+    assert bob_mgr.decrypt_from(peer_id, env) == b"authenticated"
 
 
 def test_sealed_sender_via_relay_router() -> None:

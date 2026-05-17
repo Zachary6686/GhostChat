@@ -4,13 +4,16 @@ import os
 import pathlib
 import sys
 
+import pytest
+from cryptography.exceptions import InvalidTag
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from nacl.public import PrivateKey as X25519PrivateKey
 
-from ratchet.double_ratchet import DoubleRatchet
+from ratchet.double_ratchet import DoubleRatchet, EncryptedMessage
 
 
 def _linked_sessions() -> tuple[DoubleRatchet, DoubleRatchet]:
@@ -46,4 +49,17 @@ def test_basic_send_receive() -> None:
     msg2 = bob.encrypt(reply)
     received2 = alice.decrypt(msg2)
     assert received2 == reply
+
+
+def test_failed_decrypt_does_not_advance_receive_chain() -> None:
+    alice, bob = _linked_sessions()
+    msg = alice.encrypt(b"secret")
+    bad_ct = bytearray(msg.ciphertext)
+    bad_ct[0] ^= 0x01
+    tampered = EncryptedMessage(header=msg.header, ciphertext=bytes(bad_ct))
+
+    with pytest.raises(InvalidTag):
+        bob.decrypt(tampered)
+
+    assert bob.decrypt(msg) == b"secret"
 

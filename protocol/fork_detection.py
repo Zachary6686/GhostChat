@@ -24,7 +24,7 @@ class ForkDetectionState:
     last_ratchet_pub: Optional[bytes] = None
 
 
-def detect_fork(
+def would_fork(
     state: ForkDetectionState,
     ratchet_pub: bytes,
     msg_num: int,
@@ -55,8 +55,36 @@ def detect_fork(
     if prev_chain_len < state.last_previous_chain_length:
         return True
 
+    return False
+
+
+def mark_observed(
+    state: ForkDetectionState,
+    ratchet_pub: bytes,
+    msg_num: int,
+    prev_chain_len: int,
+) -> None:
+    """
+    Commit an authenticated ratchet header to fork detection state.
+    """
+
     state.last_message_number = msg_num
     state.last_previous_chain_length = prev_chain_len
     state.last_ratchet_pub = ratchet_pub
+
+
+def detect_fork(
+    state: ForkDetectionState,
+    ratchet_pub: bytes,
+    msg_num: int,
+    prev_chain_len: int,
+) -> bool:
+    """
+    Return True if a fork is detected; otherwise commit the observation.
+    """
+
+    if would_fork(state, ratchet_pub, msg_num, prev_chain_len):
+        return True
+    mark_observed(state, ratchet_pub, msg_num, prev_chain_len)
     return False
 

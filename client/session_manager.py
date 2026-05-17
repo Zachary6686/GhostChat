@@ -16,7 +16,7 @@ from nacl.public import PrivateKey as X25519PrivateKey
 
 from protocol.envelope import ProtocolEnvelope, CURRENT_VERSION
 from protocol.replay_protection import SessionReplayCache
-from protocol.fork_detection import ForkDetectionState, detect_fork
+from protocol.fork_detection import ForkDetectionState, mark_observed, would_fork
 from protocol.session_reset import SessionResetState, mark_for_reset
 from protocol.sealed_sender import (
     SealedOuterEnvelope,
@@ -98,13 +98,12 @@ class SessionManager:
     def decrypt_from(self, peer_id: bytes, env: ProtocolEnvelope) -> bytes:
         ctx = self._get_ctx(peer_id)
 
-        # Replay protection first.
-        if not ctx.replay_cache.accept(env):
+        # Replay/fork checks must not commit unauthenticated headers.
+        if not ctx.replay_cache.would_accept(env):
             mark_for_reset(ctx.reset_state, "replay-detected")
             raise ValueError("replayed or stale envelope")
 
-        # Fork detection next.
-        if detect_fork(
+        if would_fork(
             ctx.fork_state,
             env.sender_ratchet_key,
             env.message_number,
@@ -120,7 +119,15 @@ class SessionManager:
             n=env.message_number,
         )
         em = EncryptedMessage(header=header, ciphertext=env.ciphertext)
-        return ctx.ratchet.decrypt(em)
+        plaintext = ctx.ratchet.decrypt(em)
+        ctx.replay_cache.mark_accepted(env)
+        mark_observed(
+            ctx.fork_state,
+            env.sender_ratchet_key,
+            env.message_number,
+            env.previous_chain_length,
+        )
+        return plaintext
 
     # ---- sealed sender ----
 
@@ -171,7 +178,8 @@ class SessionManager:
             except (ValueError, Exception) as e:
                 last_error = e
                 continue
-            # Replay and fork checks using synthetic protocol envelope.
+            # Replay and fork checks using synthetic protocol envelope. Commit
+            # them only after the inner ciphertext authenticates.
             syn = ProtocolEnvelope(
                 version=CURRENT_VERSION,
                 session_id=inner.session_id,
@@ -182,10 +190,10 @@ class SessionManager:
                 nonce=b"",
                 meta={},
             )
-            if not ctx.replay_cache.accept(syn):
+            if not ctx.replay_cache.would_accept(syn):
                 mark_for_reset(ctx.reset_state, "replay-detected")
                 raise ValueError("replayed or stale sealed envelope")
-            if detect_fork(ctx.fork_state, inner.dh_pub, inner.n, inner.pn):
+            if would_fork(ctx.fork_state, inner.dh_pub, inner.n, inner.pn):
                 mark_for_reset(ctx.reset_state, "fork-detected")
                 raise ValueError("fork detected")
             header = RatchetHeader(
@@ -196,6 +204,8 @@ class SessionManager:
             plaintext = ctx.ratchet.decrypt(
                 EncryptedMessage(header=header, ciphertext=inner.ciphertext)
             )
+            ctx.replay_cache.mark_accepted(syn)
+            mark_observed(ctx.fork_state, inner.dh_pub, inner.n, inner.pn)
             return (peer_id, plaintext)
         raise ValueError(
             "sealed payload could not be decrypted with any session"
