@@ -279,6 +279,65 @@ def test_ciphertext_tampering_rejected() -> None:
         bob.ratchet_decrypt(tampered)
 
 
+def test_failed_decrypt_does_not_advance_receive_state() -> None:
+    """A bad packet must not consume the honest message's receiving chain key."""
+    alice, bob = _make_pair()
+    wire = alice.ratchet_encrypt(b"secret")
+    bad_ct = bytearray(wire.ciphertext)
+    bad_ct[0] ^= 0x01
+    tampered = RatchetWireMessage(
+        header=wire.header,
+        ciphertext=bytes(bad_ct),
+        nonce=wire.nonce,
+    )
+
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.ratchet_decrypt(wire) == b"secret"
+
+
+def test_failed_skipped_key_decrypt_does_not_consume_key() -> None:
+    """Tampering with an out-of-order message must not delete its skipped key."""
+    alice, bob = _make_pair()
+    w0 = alice.ratchet_encrypt(b"m0")
+    alice.ratchet_encrypt(b"m1")
+    w2 = alice.ratchet_encrypt(b"m2")
+    assert bob.ratchet_decrypt(w2) == b"m2"
+
+    bad_ct = bytearray(w0.ciphertext)
+    bad_ct[0] ^= 0x01
+    tampered = RatchetWireMessage(
+        header=w0.header,
+        ciphertext=bytes(bad_ct),
+        nonce=w0.nonce,
+    )
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.ratchet_decrypt(w0) == b"m0"
+
+
+def test_failed_new_dh_decrypt_does_not_commit_ratchet_step() -> None:
+    """A corrupted first message in a new DH ratchet must not desynchronize peers."""
+    alice, bob = _make_pair()
+    first = alice.ratchet_encrypt(b"alice first")
+    assert bob.ratchet_decrypt(first) == b"alice first"
+    reply = bob.ratchet_encrypt(b"bob reply")
+
+    bad_ct = bytearray(reply.ciphertext)
+    bad_ct[0] ^= 0x01
+    tampered = RatchetWireMessage(
+        header=reply.header,
+        ciphertext=bytes(bad_ct),
+        nonce=reply.nonce,
+    )
+    with pytest.raises(DecryptionError):
+        alice.ratchet_decrypt(tampered)
+
+    assert alice.ratchet_decrypt(reply) == b"bob reply"
+
+
 def test_replay_after_serialization_roundtrip_rejected() -> None:
     """Replay is rejected by message identity (dh, n), not object identity."""
     alice, bob = _make_pair()
