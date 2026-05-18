@@ -262,6 +262,20 @@ class SkippedMessageKeys:
         return sk
 
 
+def _clone_skipped_keys(source: SkippedMessageKeys) -> SkippedMessageKeys:
+    clone = SkippedMessageKeys(max_keys=source.max_keys)
+    clone._store = OrderedDict(
+        ((bytes(dh), n), bytes(key)) for (dh, n), key in source._store.items()
+    )
+    return clone
+
+
+def _clone_received_ids(source: ReceivedIdsStore) -> ReceivedIdsStore:
+    clone = ReceivedIdsStore(max_size=source.max_size)
+    clone._order = OrderedDict(((bytes(dh), n), None) for (dh, n) in source._order.keys())
+    return clone
+
+
 @dataclass
 class DoubleRatchetState:
     """
@@ -318,6 +332,40 @@ class DoubleRatchetEngine:
     def state(self) -> DoubleRatchetState:
         return self._state
 
+    @staticmethod
+    def _clone_state(source: DoubleRatchetState) -> DoubleRatchetState:
+        return DoubleRatchetState(
+            root_key=bytes(source.root_key),
+            sending_chain_key=bytes(source.sending_chain_key)
+            if source.sending_chain_key is not None
+            else None,
+            receiving_chain_key=bytes(source.receiving_chain_key)
+            if source.receiving_chain_key is not None
+            else None,
+            dhs_private=bytes(source.dhs_private) if source.dhs_private is not None else None,
+            dhr=bytes(source.dhr) if source.dhr is not None else None,
+            Ns=source.Ns,
+            Nr=source.Nr,
+            PN=source.PN,
+            skipped_message_keys=_clone_skipped_keys(source.skipped_message_keys),
+            received_ids=_clone_received_ids(source.received_ids),
+            session_version=source.session_version,
+        )
+
+    @staticmethod
+    def _commit_state(destination: DoubleRatchetState, source: DoubleRatchetState) -> None:
+        destination.root_key = source.root_key
+        destination.sending_chain_key = source.sending_chain_key
+        destination.receiving_chain_key = source.receiving_chain_key
+        destination.dhs_private = source.dhs_private
+        destination.dhr = source.dhr
+        destination.Ns = source.Ns
+        destination.Nr = source.Nr
+        destination.PN = source.PN
+        destination.skipped_message_keys = source.skipped_message_keys
+        destination.received_ids = source.received_ids
+        destination.session_version = source.session_version
+
     def ratchet_encrypt(self, plaintext: bytes) -> RatchetWireMessage:
         """
         Encrypt (send). Spec: 3.1 Encrypt.
@@ -363,7 +411,13 @@ class DoubleRatchetEngine:
           6. Advance receiving chain to n (store skipped keys for Nr..n-1), derive mk for n, decrypt with AAD, add (dh,n) to received_ids, Nr = n+1.
         Postconditions: Message key used at most once; Nr increases; AAD tampering yields DecryptionError.
         """
-        state = self._state
+        trial_state = self._clone_state(self._state)
+        plaintext = self._ratchet_decrypt_mutating(msg, trial_state)
+        self._commit_state(self._state, trial_state)
+        return plaintext
+
+    def _ratchet_decrypt_mutating(self, msg: RatchetWireMessage, state: DoubleRatchetState) -> bytes:
+        """Run receive logic against a trial state; caller commits only after success."""
         h = msg.header
         if len(h.dh) != DH_PUB_LEN:
             raise DecryptionError("Invalid header: dh must be 32 bytes")
@@ -400,11 +454,11 @@ class DoubleRatchetEngine:
         if state.dhr is None and state.receiving_chain_key is not None and state.sending_chain_key is None:
             state.dhr = h.dh
         elif state.dhr is None and state.sending_chain_key is not None:
-            self._skip_receiving_until(state.Nr)
-            self._dh_ratchet_receive(h.dh)
+            self._skip_receiving_until(state.Nr, state)
+            self._dh_ratchet_receive(h.dh, state)
         elif state.receiving_chain_key is None and state.dhr is None:
-            self._skip_receiving_until(state.Nr)
-            self._dh_ratchet_receive_first(h.dh)
+            self._skip_receiving_until(state.Nr, state)
+            self._dh_ratchet_receive_first(h.dh, state)
         elif state.receiving_chain_key is None and state.dhr is not None and h.dh == state.dhr:
             peer_pub = X25519PublicKey(state.dhr)
             dhs = X25519PrivateKey(state.dhs_private)
@@ -412,8 +466,8 @@ class DoubleRatchetEngine:
             state.root_key = rk
             state.receiving_chain_key = ck_r
         if state.dhr is not None and h.dh != state.dhr:
-            self._skip_receiving_until(state.Nr)
-            self._dh_ratchet_receive(h.dh)
+            self._skip_receiving_until(state.Nr, state)
+            self._dh_ratchet_receive(h.dh, state)
         if h.n < state.Nr:
             raise DuplicateMessageError("Message number already processed (replay)")
         # Skip distance: refuse to derive keys for n too far ahead of Nr (DoS bound).
@@ -422,7 +476,7 @@ class DoubleRatchetEngine:
                 f"Skip distance {h.n - state.Nr} exceeds MAX_SKIP_DISTANCE={MAX_SKIP_DISTANCE}"
             )
         # Advance receiving chain to n, storing skipped keys for out-of-order delivery.
-        self._skip_receiving_until(h.n)
+        self._skip_receiving_until(h.n, state)
         state.receiving_chain_key, mk = kdf_chain(state.receiving_chain_key)
         state.Nr += 1
         nonce = _message_key_to_nonce(mk, h.n)
@@ -438,13 +492,13 @@ class DoubleRatchetEngine:
         except Exception as e:
             raise DecryptionError("AEAD verification failed") from e
 
-    def _skip_receiving_until(self, until: int) -> None:
+    def _skip_receiving_until(self, until: int, state: Optional[DoubleRatchetState] = None) -> None:
         """
         Advance receiving chain from Nr to until; store message keys in skipped_message_keys.
         Used when we receive message n > Nr: we must derive (and store) keys for Nr..until-1
         so out-of-order delivery can decrypt them later. Invariant: keys are single-use (pop on decrypt).
         """
-        state = self._state
+        state = self._state if state is None else state
         if state.receiving_chain_key is None:
             return
         if state.dhr is None:
@@ -454,23 +508,31 @@ class DoubleRatchetEngine:
             state.skipped_message_keys.add(state.dhr, state.Nr, mk)
             state.Nr += 1
 
-    def _dh_ratchet_receive_first(self, new_remote_dh: bytes) -> None:
+    def _dh_ratchet_receive_first(
+        self,
+        new_remote_dh: bytes,
+        state: Optional[DoubleRatchetState] = None,
+    ) -> None:
         """
         First receive (no dhr yet): set dhr = header.dh, derive receiving_chain_key from root_key
         (same as initiator's initial send chain). Spec: bootstrap receiving chain.
         """
-        state = self._state
+        state = self._state if state is None else state
         state.dhr = new_remote_dh
         state.receiving_chain_key = kdf_initial_chain(state.root_key)
 
-    def _dh_ratchet_receive(self, new_remote_dh: bytes) -> None:
+    def _dh_ratchet_receive(
+        self,
+        new_remote_dh: bytes,
+        state: Optional[DoubleRatchetState] = None,
+    ) -> None:
         """
         New DH ratchet (spec 3.3). Precondition: header.dh != dhr (new remote key).
         Steps: PN = Ns; Ns = 0; Nr = 0; dhr = new_remote_dh; root_key, receiving_chain_key = KDF(root_key, DH(dhs_private, new_remote_dh));
         generate new dhs_private; sending_chain_key = None (until _dh_ratchet_step_send).
         Postconditions: Old chains isolated; forward secrecy preserved.
         """
-        state = self._state
+        state = self._state if state is None else state
         state.PN = state.Ns
         state.Ns = 0
         state.Nr = 0
