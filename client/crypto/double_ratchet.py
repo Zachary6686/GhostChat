@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -363,6 +364,15 @@ class DoubleRatchetEngine:
           6. Advance receiving chain to n (store skipped keys for Nr..n-1), derive mk for n, decrypt with AAD, add (dh,n) to received_ids, Nr = n+1.
         Postconditions: Message key used at most once; Nr increases; AAD tampering yields DecryptionError.
         """
+        trial_state = deepcopy(self._state)
+        trial = DoubleRatchetEngine(trial_state)
+        plaintext = trial._ratchet_decrypt_in_place(msg)
+        # Commit only after AEAD succeeds so tampering cannot consume keys or counters.
+        self._state.__dict__.update(trial_state.__dict__)
+        return plaintext
+
+    def _ratchet_decrypt_in_place(self, msg: RatchetWireMessage) -> bytes:
+        """Decrypt against this state object, mutating only the caller's selected state."""
         state = self._state
         h = msg.header
         if len(h.dh) != DH_PUB_LEN:
