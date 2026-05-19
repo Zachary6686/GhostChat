@@ -137,6 +137,46 @@ def test_corrupted_ciphertext_rejected() -> None:
         bob.ratchet_decrypt(tampered)
 
 
+def test_failed_decrypt_does_not_consume_current_chain_message() -> None:
+    """A failed AEAD check must not advance Nr or lose the legitimate message key."""
+    alice, bob = _make_pair()
+    wire = alice.ratchet_encrypt(b"secret")
+    original_nr = bob.state.Nr
+    original_receiving_chain_key = bob.state.receiving_chain_key
+    tampered = RatchetWireMessage(
+        header=wire.header,
+        ciphertext=bytes(32),
+        nonce=wire.nonce,
+    )
+
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.state.Nr == original_nr
+    assert bob.state.receiving_chain_key == original_receiving_chain_key
+    assert bob.ratchet_decrypt(wire) == b"secret"
+
+
+def test_failed_decrypt_does_not_consume_skipped_message_key() -> None:
+    """Tampering with an out-of-order message must leave its skipped key available."""
+    alice, bob = _make_pair()
+    w0 = alice.ratchet_encrypt(b"m0")
+    w1 = alice.ratchet_encrypt(b"m1")
+    assert bob.ratchet_decrypt(w1) == b"m1"
+    assert bob.state.skipped_message_keys.has(w0.header.dh, w0.header.n)
+    tampered = RatchetWireMessage(
+        header=w0.header,
+        ciphertext=bytes(32),
+        nonce=w0.nonce,
+    )
+
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.state.skipped_message_keys.has(w0.header.dh, w0.header.n)
+    assert bob.ratchet_decrypt(w0) == b"m0"
+
+
 def test_invalid_header_rejected() -> None:
     """wire_message_from_dict rejects missing or invalid header fields."""
     with pytest.raises(InvalidHeaderError):
