@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from nacl.public import PrivateKey as X25519PrivateKey, PublicKey as X25519PublicKey, Box
@@ -37,6 +37,23 @@ def _mk_to_nonce(mk: bytes, n: int) -> bytes:
     for i in range(4):
         base[-1 - i] ^= (n >> (8 * i)) & 0xFF
     return bytes(base)
+
+
+def _clone_state(state: RatchetState) -> RatchetState:
+    return RatchetState(
+        root_key=state.root_key,
+        dhs=state.dhs,
+        dhr=state.dhr,
+        ck_s=state.ck_s,
+        ck_r=state.ck_r,
+        Ns=state.Ns,
+        Nr=state.Nr,
+        PN=state.PN,
+        skipped_keys=SkippedKeyStore(
+            max_keys=state.skipped_keys.max_keys,
+            _store=dict(state.skipped_keys._store),
+        ),
+    )
 
 
 @dataclass
@@ -125,8 +142,18 @@ class DoubleRatchet:
     def decrypt(self, message: EncryptedMessage, ad: bytes = b"") -> bytes:
         """
         Decrypt a message, handling out-of-order delivery and skipped keys.
-        """
 
+        Receive state is mutated on a trial copy first and committed only after
+        AEAD authentication succeeds so forged ciphertext cannot consume chain
+        counters or skipped keys.
+        """
+        trial = DoubleRatchet.__new__(DoubleRatchet)
+        trial.state = _clone_state(self.state)
+        plaintext = trial._decrypt_mutating(message, ad)
+        self.state = trial.state
+        return plaintext
+
+    def _decrypt_mutating(self, message: EncryptedMessage, ad: bytes = b"") -> bytes:
         h = message.header
 
         # 1. Skipped message keys first.

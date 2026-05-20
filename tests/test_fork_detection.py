@@ -14,19 +14,25 @@ def test_no_fork_on_monotonic_progress() -> None:
     state = ForkDetectionState()
     assert not detect_fork(state, b"rk1", 0, 0)
     assert not detect_fork(state, b"rk1", 1, 0)
-    # New ratchet key with higher message number should be fine.
-    assert not detect_fork(state, b"rk2", 2, 1)
+    # New ratchet key resets message numbering in a normal DH ratchet step.
+    assert not detect_fork(state, b"rk2", 0, 1)
 
 
-def test_fork_on_message_number_regression() -> None:
+def test_no_fork_on_out_of_order_message_number() -> None:
     state = ForkDetectionState()
     assert not detect_fork(state, b"rk1", 5, 0)
-    assert detect_fork(state, b"rk1", 3, 0)
+    assert not detect_fork(state, b"rk1", 3, 0)
 
 
-def test_fork_on_prev_chain_len_regression() -> None:
+def test_fork_on_conflicting_prev_chain_len_for_same_ratchet_key() -> None:
     state = ForkDetectionState()
     assert not detect_fork(state, b"rk1", 0, 5)
-    # Previous chain length decreasing is suspicious.
+    # The same ratchet key should not appear with a different PN value.
     assert detect_fork(state, b"rk1", 1, 3)
+
+
+def test_no_fork_on_lower_prev_chain_len_for_new_ratchet_key() -> None:
+    state = ForkDetectionState()
+    assert not detect_fork(state, b"rk1", 0, 5)
+    assert not detect_fork(state, b"rk2", 0, 1)
 
