@@ -32,6 +32,12 @@ def _rand_id() -> bytes:
     return os.urandom(16)
 
 
+def _tamper_group_msg(msg: GroupMessage) -> GroupMessage:
+    tampered = bytearray(msg.ciphertext)
+    tampered[-1] ^= 0x01
+    return GroupMessage(header=msg.header, ciphertext=bytes(tampered))
+
+
 def test_create_group_alice_bob_charlie() -> None:
     """Create a group with Alice, Bob, Charlie successfully."""
     gid = _rand_id()
@@ -70,6 +76,54 @@ def test_send_valid_group_message_decrypt_at_recipients() -> None:
     send_group_text("alice", gid, "hello group", member_profiles=["alice", "bob"])
     msgs = recv_group_text("bob", gid)
     assert msgs == ["hello group"]
+
+
+def test_send_group_text_preserves_counter_across_sends() -> None:
+    gid = _rand_id()
+    a, b = os.urandom(32), os.urandom(32)
+    controller = MembershipController.create_group(gid, [a, b])
+    state = controller.state
+    leaf_a = state.members[a].leaf_index
+    leaf_b = state.members[b].leaf_index
+
+    alice_mgr = GroupManager(a)
+    alice_mgr.set_state(gid, controller, leaf_a)
+    bob_mgr = GroupManager(b)
+    bob_mgr.join_group(gid, state, leaf_b)
+
+    register_endpoint("alice", SessionManager("alice"), alice_mgr)
+    register_endpoint("bob", SessionManager("bob"), bob_mgr)
+
+    send_group_text("alice", gid, "one", member_profiles=["alice", "bob"])
+    send_group_text("alice", gid, "two", member_profiles=["alice", "bob"])
+
+    msgs = recv_group_text("bob", gid)
+    assert msgs == ["one", "two"]
+
+
+def test_group_receiver_replay_cache_is_scoped_by_epoch() -> None:
+    gid = _rand_id()
+    a, b, dave = os.urandom(32), os.urandom(32), os.urandom(32)
+    controller = MembershipController.create_group(gid, [a, b])
+    state = controller.state
+    leaf_a = state.members[a].leaf_index
+    leaf_b = state.members[b].leaf_index
+
+    alice_mgr = GroupManager(a)
+    alice_mgr.set_state(gid, controller, leaf_a)
+    bob_mgr = GroupManager(b)
+    bob_mgr.join_group(gid, state, leaf_b)
+
+    register_endpoint("alice", SessionManager("alice"), alice_mgr)
+    register_endpoint("bob", SessionManager("bob"), bob_mgr)
+
+    send_group_text("alice", gid, "before add", member_profiles=["alice", "bob"])
+    assert recv_group_text("bob", gid) == ["before add"]
+
+    alice_mgr.add_group_member(gid, dave)
+
+    send_group_text("alice", gid, "after add", member_profiles=["alice", "bob"])
+    assert recv_group_text("bob", gid) == ["after add"]
 
 
 def test_add_dave_epoch_rotates_dave_cannot_decrypt_prior() -> None:
@@ -167,6 +221,28 @@ def test_duplicate_replayed_group_message_rejected() -> None:
         assert False, "Replay should be rejected"
     except ReplayedGroupMessageError:
         pass
+
+
+def test_tampered_group_message_does_not_poison_replay_cache() -> None:
+    gid = _rand_id()
+    a, b = os.urandom(32), os.urandom(32)
+    controller = MembershipController.create_group(gid, [a, b])
+    state = controller.state
+    leaf_a = state.members[a].leaf_index
+    leaf_b = state.members[b].leaf_index
+
+    sender = GroupMessenger(state, sender_leaf_index=leaf_a)
+    receiver = GroupMessenger(state, sender_leaf_index=leaf_b)
+    msg = sender.encrypt(b"authentic")
+
+    try:
+        receiver.decrypt(_tamper_group_msg(msg))
+    except Exception:
+        pass
+    else:  # pragma: no cover - defensive
+        raise AssertionError("Tampered group message should fail authentication")
+
+    assert receiver.decrypt(msg) == b"authentic"
 
 
 def test_malformed_serialized_group_state_rejected() -> None:

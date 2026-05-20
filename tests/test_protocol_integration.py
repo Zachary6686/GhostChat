@@ -59,6 +59,21 @@ def _linked_managers() -> tuple[SessionManager, SessionManager, bytes, bytes]:
     return alice_mgr, bob_mgr, peer_id, root_key
 
 
+def _tamper_env(env: ProtocolEnvelope) -> ProtocolEnvelope:
+    tampered = bytearray(env.ciphertext)
+    tampered[-1] ^= 0x01
+    return ProtocolEnvelope(
+        version=env.version,
+        session_id=env.session_id,
+        sender_ratchet_key=env.sender_ratchet_key,
+        message_number=env.message_number,
+        previous_chain_length=env.previous_chain_length,
+        ciphertext=bytes(tampered),
+        nonce=env.nonce,
+        meta=env.meta,
+    )
+
+
 def test_protocol_integration_end_to_end() -> None:
     alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
     register_endpoint("alice", alice_mgr)
@@ -124,6 +139,55 @@ def test_end_to_end_via_relay_router() -> None:
     received_env = ProtocolEnvelope.from_dict(incoming[0])
     plaintext = bob_mgr.decrypt_from(peer_id, received_env)
     assert plaintext == b"hello via relay"
+
+
+def test_protocol_accepts_out_of_order_same_chain_messages() -> None:
+    alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
+
+    env0 = alice_mgr.encrypt_for(peer_id, b"zero")
+    env1 = alice_mgr.encrypt_for(peer_id, b"one")
+    env2 = alice_mgr.encrypt_for(peer_id, b"two")
+
+    assert bob_mgr.decrypt_from(peer_id, env0) == b"zero"
+    assert bob_mgr.decrypt_from(peer_id, env2) == b"two"
+    assert bob_mgr.decrypt_from(peer_id, env1) == b"one"
+
+
+def test_protocol_tampered_ciphertext_does_not_poison_receive_state() -> None:
+    alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
+    env = alice_mgr.encrypt_for(peer_id, b"authentic")
+
+    try:
+        bob_mgr.decrypt_from(peer_id, _tamper_env(env))
+    except Exception:
+        pass
+    else:  # pragma: no cover - defensive
+        raise AssertionError("Tampered ciphertext should fail authentication")
+
+    assert not bob_mgr._sessions[peer_id].reset_state.needs_reset
+    assert bob_mgr.decrypt_from(peer_id, env) == b"authentic"
+
+
+def test_protocol_accepts_new_ratchet_key_with_reset_message_number() -> None:
+    alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
+
+    first = alice_mgr.encrypt_for(peer_id, b"a0")
+    assert bob_mgr.decrypt_from(peer_id, first) == b"a0"
+
+    bob0 = bob_mgr.encrypt_for(peer_id, b"b0")
+    bob1 = bob_mgr.encrypt_for(peer_id, b"b1")
+    bob2 = bob_mgr.encrypt_for(peer_id, b"b2")
+    assert alice_mgr.decrypt_from(peer_id, bob0) == b"b0"
+    assert alice_mgr.decrypt_from(peer_id, bob1) == b"b1"
+    assert alice_mgr.decrypt_from(peer_id, bob2) == b"b2"
+
+    alice_reply = alice_mgr.encrypt_for(peer_id, b"a1")
+    assert bob_mgr.decrypt_from(peer_id, alice_reply) == b"a1"
+
+    bob_new_chain = bob_mgr.encrypt_for(peer_id, b"b-reset")
+    assert bob_new_chain.message_number == 0
+    assert bob_new_chain.sender_ratchet_key != bob2.sender_ratchet_key
+    assert alice_mgr.decrypt_from(peer_id, bob_new_chain) == b"b-reset"
 
 
 def test_sealed_sender_via_relay_router() -> None:
