@@ -184,6 +184,10 @@ def test_protocol_accepts_new_ratchet_key_with_reset_message_number() -> None:
     alice_reply = alice_mgr.encrypt_for(peer_id, b"a1")
     assert bob_mgr.decrypt_from(peer_id, alice_reply) == b"a1"
 
+    bob_state = bob_mgr._sessions[peer_id].ratchet.state
+    bob_state.PN = bob_state.Ns
+    bob_state.dhs = X25519PrivateKey.generate()
+    bob_state.ck_s = None
     bob_new_chain = bob_mgr.encrypt_for(peer_id, b"b-reset")
     assert bob_new_chain.message_number == 0
     assert bob_new_chain.sender_ratchet_key != bob2.sender_ratchet_key
