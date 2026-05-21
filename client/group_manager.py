@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """
 Group manager for client-side group state and messaging.
 
 Holds one controller (or state-only holder) per group; provides create_group,
 add_member, remove_member, and access to GroupMessenger for sending.
 """
+
+from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
