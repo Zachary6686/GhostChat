@@ -4,6 +4,9 @@ import os
 import pathlib
 import sys
 
+import pytest
+from cryptography.exceptions import InvalidTag
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -17,7 +20,7 @@ from client.message_api import (
 from client.group_manager import GroupManager
 from client.session_manager import SessionManager
 from group.membership import MembershipController
-from group.group_messaging import GroupMessenger
+from group.group_messaging import GroupMessage, GroupMessenger
 from group.errors import EpochMismatchError, ReplayedGroupMessageError
 from group.state_verification import (
     validate_local_state,
@@ -70,6 +73,32 @@ def test_send_valid_group_message_decrypt_at_recipients() -> None:
     send_group_text("alice", gid, "hello group", member_profiles=["alice", "bob"])
     msgs = recv_group_text("bob", gid)
     assert msgs == ["hello group"]
+
+
+def test_send_group_text_preserves_sender_counter_between_calls() -> None:
+    """High-level group sends must not reuse counter 0 under one epoch key."""
+    gid = _rand_id()
+    a, b = os.urandom(32), os.urandom(32)
+    controller = MembershipController.create_group(gid, [a, b])
+    state = controller.state
+    leaf_a = state.members[a].leaf_index
+    leaf_b = state.members[b].leaf_index
+
+    alice_mgr = GroupManager(a)
+    alice_mgr.set_state(gid, controller, leaf_a)
+    bob_mgr = GroupManager(b)
+    bob_mgr.join_group(gid, state, leaf_b)
+
+    register_endpoint("alice-multi", SessionManager("alice-multi"), alice_mgr)
+    register_endpoint("bob-multi", SessionManager("bob-multi"), bob_mgr)
+
+    send_group_text("alice-multi", gid, "first", member_profiles=["bob-multi"])
+    send_group_text("alice-multi", gid, "second", member_profiles=["bob-multi"])
+
+    inbox = _endpoints["bob-multi"].group_inbox[gid]
+    counters = [GroupMessage.from_dict(envelope["group_message"]).header.counter for envelope in inbox]
+    assert counters == [0, 1]
+    assert recv_group_text("bob-multi", gid) == ["first", "second"]
 
 
 def test_add_dave_epoch_rotates_dave_cannot_decrypt_prior() -> None:
@@ -167,6 +196,64 @@ def test_duplicate_replayed_group_message_rejected() -> None:
         assert False, "Replay should be rejected"
     except ReplayedGroupMessageError:
         pass
+
+
+def test_tampered_group_message_does_not_poison_replay_cache() -> None:
+    """Replay counters are marked only after AEAD authentication succeeds."""
+    gid = _rand_id()
+    a, b = os.urandom(32), os.urandom(32)
+    controller = MembershipController.create_group(gid, [a, b])
+    state = controller.state
+    leaf_a = state.members[a].leaf_index
+    leaf_b = state.members[b].leaf_index
+
+    sender = GroupMessenger(state, sender_leaf_index=leaf_a)
+    receiver = GroupMessenger(state, sender_leaf_index=leaf_b)
+    msg = sender.encrypt(b"authenticated")
+    tampered = GroupMessage(
+        header=msg.header,
+        ciphertext=msg.ciphertext[:-1] + bytes([msg.ciphertext[-1] ^ 0x01]),
+    )
+
+    with pytest.raises(InvalidTag):
+        receiver.decrypt(tampered)
+    assert receiver.decrypt(msg) == b"authenticated"
+
+
+def test_group_replay_cache_eviction_allows_new_messages() -> None:
+    """A full bounded replay cache evicts old entries instead of dropping all new messages."""
+    gid = _rand_id()
+    a, b = os.urandom(32), os.urandom(32)
+    controller = MembershipController.create_group(gid, [a, b])
+    state = controller.state
+    leaf_a = state.members[a].leaf_index
+    leaf_b = state.members[b].leaf_index
+
+    sender = GroupMessenger(state, sender_leaf_index=leaf_a)
+    receiver = GroupMessenger(state, sender_leaf_index=leaf_b, max_replay_entries=1)
+    msg1 = sender.encrypt(b"one")
+    msg2 = sender.encrypt(b"two")
+
+    assert receiver.decrypt(msg1) == b"one"
+    assert receiver.decrypt(msg2) == b"two"
+
+
+def test_group_replay_cache_is_epoch_scoped() -> None:
+    """Counter 0 in a new epoch is not a replay of counter 0 from an old key."""
+    gid = _rand_id()
+    a, b = os.urandom(32), os.urandom(32)
+    controller = MembershipController.create_group(gid, [a, b])
+    state = controller.state
+    leaf_a = state.members[a].leaf_index
+    leaf_b = state.members[b].leaf_index
+
+    sender_epoch1 = GroupMessenger(state, sender_leaf_index=leaf_a)
+    receiver = GroupMessenger(state, sender_leaf_index=leaf_b)
+    assert receiver.decrypt(sender_epoch1.encrypt(b"epoch one")) == b"epoch one"
+
+    controller.add_member(os.urandom(32))
+    sender_epoch2 = GroupMessenger(state, sender_leaf_index=leaf_a)
+    assert receiver.decrypt(sender_epoch2.encrypt(b"epoch two")) == b"epoch two"
 
 
 def test_malformed_serialized_group_state_rejected() -> None:

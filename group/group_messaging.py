@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, Set, Tuple
+from typing import Any, Deque, Dict, Set, Tuple
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
@@ -54,19 +55,28 @@ class GroupMessage:
 @dataclass
 class ReplayCache:
     """
-    Bounded per-sender replay cache keyed by (sender_leaf_index, counter).
+    Bounded per-sender replay cache keyed by (epoch, sender_leaf_index, counter).
     """
 
     max_entries: int = 2048
-    seen: Set[Tuple[int, int]] = field(default_factory=set)
+    seen: Set[Tuple[int, int, int]] = field(default_factory=set)
+    order: Deque[Tuple[int, int, int]] = field(default_factory=deque)
 
-    def check_and_mark(self, sender_leaf: int, counter: int) -> bool:
-        key = (sender_leaf, counter)
-        if key in self.seen:
-            return False
-        if len(self.seen) >= self.max_entries:
-            return False
+    def contains(self, epoch: int, sender_leaf: int, counter: int) -> bool:
+        return (epoch, sender_leaf, counter) in self.seen
+
+    def mark(self, epoch: int, sender_leaf: int, counter: int) -> None:
+        key = (epoch, sender_leaf, counter)
         self.seen.add(key)
+        self.order.append(key)
+        while len(self.order) > self.max_entries:
+            expired = self.order.popleft()
+            self.seen.discard(expired)
+
+    def check_and_mark(self, sender_leaf: int, counter: int, epoch: int = INITIAL_EPOCH) -> bool:
+        if self.contains(epoch, sender_leaf, counter):
+            return False
+        self.mark(epoch, sender_leaf, counter)
         return True
 
 
@@ -130,9 +140,7 @@ class GroupMessenger:
         ):
             raise MembershipError("Unknown sender leaf index")
 
-        if not self._replay_cache.check_and_mark(
-            header.sender_leaf_index, header.counter
-        ):
+        if self._replay_cache.contains(header.epoch, header.sender_leaf_index, header.counter):
             raise ReplayedGroupMessageError("Duplicate group message counter")
 
         app_key = self.state.application_key
@@ -148,5 +156,7 @@ class GroupMessenger:
             + header.counter.to_bytes(8, "big")
             + ad
         )
-        return aead.decrypt(nonce, message.ciphertext, ad_bytes)
+        plaintext = aead.decrypt(nonce, message.ciphertext, ad_bytes)
+        self._replay_cache.mark(header.epoch, header.sender_leaf_index, header.counter)
+        return plaintext
 

@@ -36,6 +36,7 @@ class GroupManager:
     def __init__(self, identity_pk: bytes) -> None:
         self._identity_pk = identity_pk
         self._groups: Dict[bytes, Tuple[object, int]] = {}  # controller or _StateOnlyHolder, my_leaf_index
+        self._senders: Dict[bytes, Tuple[int, GroupMessenger]] = {}  # cached sender, scoped to current epoch
         self._receivers: Dict[bytes, GroupMessenger] = {}  # cached receiver for decrypt (persists replay cache)
 
     def create_group(self, group_id: bytes, member_ids: List[bytes]) -> None:
@@ -55,11 +56,15 @@ class GroupManager:
         """Add a member; epoch advances. Caller must distribute new state to members."""
         controller, idx = self._groups[group_id]
         controller.add_member(member_id)
+        self._senders.pop(group_id, None)
+        self._receivers.pop(group_id, None)
 
     def remove_group_member(self, group_id: bytes, member_id: bytes) -> None:
         """Remove a member; epoch advances."""
         controller, idx = self._groups[group_id]
         controller.remove_member(member_id)
+        self._senders.pop(group_id, None)
+        self._receivers.pop(group_id, None)
 
     def get_state(self, group_id: bytes) -> Optional[GroupState]:
         """Return current group state or None."""
@@ -72,7 +77,14 @@ class GroupManager:
         if group_id not in self._groups:
             return None
         controller, my_leaf_index = self._groups[group_id]
-        return GroupMessenger(controller.state, sender_leaf_index=my_leaf_index)
+        cached = self._senders.get(group_id)
+        if cached is None or cached[0] != controller.state.epoch:
+            cached = (
+                controller.state.epoch,
+                GroupMessenger(controller.state, sender_leaf_index=my_leaf_index),
+            )
+            self._senders[group_id] = cached
+        return cached[1]
 
     def get_receiver(self, group_id: bytes) -> Optional[GroupMessenger]:
         """Return a GroupMessenger used only for decrypt (replay cache persisted)."""
@@ -93,9 +105,11 @@ class GroupManager:
         if group_id in self._groups:
             raise ValueError("Already in group")
         self._groups[group_id] = (_StateOnlyHolder(state), my_leaf_index)
+        self._senders.pop(group_id, None)
         self._receivers.pop(group_id, None)
 
     def set_state(self, group_id: bytes, controller: MembershipController, my_leaf_index: int) -> None:
         """Set or replace group state (e.g. after receiving updated state)."""
         self._groups[group_id] = (controller, my_leaf_index)
+        self._senders.pop(group_id, None)
         self._receivers.pop(group_id, None)
