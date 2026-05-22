@@ -25,6 +25,7 @@ Key invariants (security-critical)
 from __future__ import annotations
 
 import base64
+import copy
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -362,6 +363,18 @@ class DoubleRatchetEngine:
           5. Reject if n < Nr (already processed). Reject if n - Nr > MAX_SKIP_DISTANCE (skip distance limit).
           6. Advance receiving chain to n (store skipped keys for Nr..n-1), derive mk for n, decrypt with AAD, add (dh,n) to received_ids, Nr = n+1.
         Postconditions: Message key used at most once; Nr increases; AAD tampering yields DecryptionError.
+        """
+        trial_state = copy.deepcopy(self._state)
+        trial_engine = DoubleRatchetEngine(trial_state)
+        plaintext = trial_engine._ratchet_decrypt_mutating(msg)
+        self._state.__dict__.update(trial_state.__dict__)
+        return plaintext
+
+    def _ratchet_decrypt_mutating(self, msg: RatchetWireMessage) -> bytes:
+        """
+        Decrypt against this engine's state. Callers that handle untrusted
+        ciphertext should use ratchet_decrypt(), which commits this mutation
+        only after AEAD authentication succeeds.
         """
         state = self._state
         h = msg.header
