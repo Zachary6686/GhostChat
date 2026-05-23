@@ -87,9 +87,9 @@ def recv_text(profile: str, peer_id: bytes) -> list[str]:
     while i < len(endpoint.inbox):
         item = endpoint.inbox[i]
         if isinstance(item, ProtocolEnvelope):
-            endpoint.inbox.pop(i)
             plaintext = mgr.decrypt_from(peer_id, item)
             out.append(plaintext.decode("utf-8"))
+            endpoint.inbox.pop(i)
         else:
             i += 1
     return out
@@ -114,12 +114,13 @@ def recv_sealed(
     while i < len(endpoint.inbox):
         item = endpoint.inbox[i]
         if isinstance(item, dict) and is_sealed_envelope(item):
-            endpoint.inbox.pop(i)
             try:
                 peer_id, plaintext = mgr.decrypt_sealed(item)
                 out.append((peer_id, plaintext.decode("utf-8")))
+                endpoint.inbox.pop(i)
             except ValueError as e:
                 if drop_undecryptable and "could not be decrypted" in str(e):
+                    endpoint.inbox.pop(i)
                     continue  # dummy or cover, drop
                 raise
         else:

@@ -24,7 +24,7 @@ def _env(session_id: bytes, rk: bytes, n: int) -> ProtocolEnvelope:
     )
 
 
-def test_replay_cache_rejects_duplicates_and_stale() -> None:
+def test_replay_cache_rejects_exact_duplicates_only() -> None:
     cache = SessionReplayCache(max_entries=4)
     env1 = _env(b"s", b"rk", 1)
     env2 = _env(b"s", b"rk", 2)
@@ -32,7 +32,13 @@ def test_replay_cache_rejects_duplicates_and_stale() -> None:
 
     assert cache.accept(env1)
     assert cache.accept(env2)
-    assert not cache.accept(env3)  # duplicate / stale
+    assert not cache.accept(env3)
+
+
+def test_replay_cache_allows_out_of_order_unseen_numbers() -> None:
+    cache = SessionReplayCache(max_entries=4)
+    assert cache.accept(_env(b"s", b"rk", 2))
+    assert cache.accept(_env(b"s", b"rk", 1))
 
 
 def test_replay_cache_bounded_capacity() -> None:

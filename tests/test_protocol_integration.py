@@ -3,11 +3,14 @@ from __future__ import annotations
 import os
 import pathlib
 import sys
+from dataclasses import replace
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import pytest
+from cryptography.exceptions import InvalidTag
 from nacl.public import PrivateKey as X25519PrivateKey
 
 from client.message_api import (
@@ -67,6 +70,51 @@ def test_protocol_integration_end_to_end() -> None:
     send_text("alice", "bob", peer_id, "hello bob")
     msgs = recv_text("bob", peer_id)
     assert msgs == ["hello bob"]
+
+
+def test_bidirectional_burst_then_reply_does_not_fork() -> None:
+    alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
+    register_endpoint("alice", alice_mgr)
+    register_endpoint("bob", bob_mgr)
+
+    send_text("alice", "bob", peer_id, "m1")
+    send_text("alice", "bob", peer_id, "m2")
+    assert recv_text("bob", peer_id) == ["m1", "m2"]
+
+    send_text("bob", "alice", peer_id, "reply")
+    assert recv_text("alice", peer_id) == ["reply"]
+
+    send_text("alice", "bob", peer_id, "m3")
+    assert recv_text("bob", peer_id) == ["m3"]
+
+
+def test_protocol_replay_cache_allows_out_of_order_delivery() -> None:
+    alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
+
+    env1 = alice_mgr.encrypt_for(peer_id, b"m1")
+    env2 = alice_mgr.encrypt_for(peer_id, b"m2")
+    env3 = alice_mgr.encrypt_for(peer_id, b"m3")
+
+    assert bob_mgr.decrypt_from(peer_id, env3) == b"m3"
+    assert bob_mgr.decrypt_from(peer_id, env2) == b"m2"
+    assert bob_mgr.decrypt_from(peer_id, env1) == b"m1"
+
+
+def test_tampered_envelope_does_not_consume_receive_state() -> None:
+    alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
+    env = alice_mgr.encrypt_for(peer_id, b"retry after tamper")
+    tampered = replace(
+        env,
+        ciphertext=env.ciphertext[:-1] + bytes([env.ciphertext[-1] ^ 0x01]),
+    )
+
+    with pytest.raises(InvalidTag):
+        bob_mgr.decrypt_from(peer_id, tampered)
+
+    ctx = bob_mgr._sessions[peer_id]
+    assert len(ctx.replay_cache.seen) == 0
+    assert ctx.fork_state.last_ratchet_pub is None
+    assert bob_mgr.decrypt_from(peer_id, env) == b"retry after tamper"
 
 
 def test_protocol_integration_replay_triggers_reset() -> None:

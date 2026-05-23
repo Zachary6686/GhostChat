@@ -54,20 +54,28 @@ class GroupMessage:
 @dataclass
 class ReplayCache:
     """
-    Bounded per-sender replay cache keyed by (sender_leaf_index, counter).
+    Bounded per-sender replay cache keyed by (epoch, sender_leaf_index, counter).
     """
 
     max_entries: int = 2048
-    seen: Set[Tuple[int, int]] = field(default_factory=set)
+    seen: Set[Tuple[int, int, int]] = field(default_factory=set)
 
-    def check_and_mark(self, sender_leaf: int, counter: int) -> bool:
-        key = (sender_leaf, counter)
+    def is_fresh(self, epoch: int, sender_leaf: int, counter: int) -> bool:
+        key = (epoch, sender_leaf, counter)
         if key in self.seen:
             return False
         if len(self.seen) >= self.max_entries:
             return False
-        self.seen.add(key)
         return True
+
+    def mark(self, epoch: int, sender_leaf: int, counter: int) -> bool:
+        if not self.is_fresh(epoch, sender_leaf, counter):
+            return False
+        self.seen.add((epoch, sender_leaf, counter))
+        return True
+
+    def check_and_mark(self, sender_leaf: int, counter: int, epoch: int = INITIAL_EPOCH) -> bool:
+        return self.mark(epoch, sender_leaf, counter)
 
 
 class GroupMessenger:
@@ -130,8 +138,8 @@ class GroupMessenger:
         ):
             raise MembershipError("Unknown sender leaf index")
 
-        if not self._replay_cache.check_and_mark(
-            header.sender_leaf_index, header.counter
+        if not self._replay_cache.is_fresh(
+            header.epoch, header.sender_leaf_index, header.counter
         ):
             raise ReplayedGroupMessageError("Duplicate group message counter")
 
@@ -148,5 +156,10 @@ class GroupMessenger:
             + header.counter.to_bytes(8, "big")
             + ad
         )
-        return aead.decrypt(nonce, message.ciphertext, ad_bytes)
+        plaintext = aead.decrypt(nonce, message.ciphertext, ad_bytes)
+        if not self._replay_cache.mark(
+            header.epoch, header.sender_leaf_index, header.counter
+        ):
+            raise ReplayedGroupMessageError("Duplicate group message counter")
+        return plaintext
 
