@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from nacl.public import PrivateKey as X25519PrivateKey, PublicKey as X25519PublicKey, Box
@@ -127,6 +127,14 @@ class DoubleRatchet:
         Decrypt a message, handling out-of-order delivery and skipped keys.
         """
 
+        snapshot = self._snapshot_state()
+        try:
+            return self._decrypt_in_place(message, ad)
+        except Exception:
+            self.state = snapshot
+            raise
+
+    def _decrypt_in_place(self, message: EncryptedMessage, ad: bytes = b"") -> bytes:
         h = message.header
 
         # 1. Skipped message keys first.
@@ -163,6 +171,21 @@ class DoubleRatchet:
         return _aead_decrypt(mk, nonce, message.ciphertext, ad)
 
     # --- internal helpers ---
+
+    def _snapshot_state(self) -> RatchetState:
+        skipped = SkippedKeyStore(max_keys=self.state.skipped_keys.max_keys)
+        skipped._store = dict(self.state.skipped_keys._store)
+        return RatchetState(
+            root_key=self.state.root_key,
+            dhs=X25519PrivateKey(bytes(self.state.dhs)),
+            dhr=self.state.dhr,
+            ck_s=self.state.ck_s,
+            ck_r=self.state.ck_r,
+            Ns=self.state.Ns,
+            Nr=self.state.Nr,
+            PN=self.state.PN,
+            skipped_keys=skipped,
+        )
 
     def _skip_message_keys(self, *, until: int) -> None:
         """
