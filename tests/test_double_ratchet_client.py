@@ -35,7 +35,6 @@ from client.crypto.ratchet_errors import (
     DecryptionError,
     DuplicateMessageError,
     InvalidHeaderError,
-    SessionRollbackError,
     SkippedKeyStorageLimitError,
 )
 from client.session_store import load_session, save_session, state_from_dict, state_to_dict
