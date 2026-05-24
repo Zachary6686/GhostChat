@@ -35,7 +35,6 @@ from client.crypto.ratchet_errors import (
     DecryptionError,
     DuplicateMessageError,
     InvalidHeaderError,
-    SessionRollbackError,
     SkippedKeyStorageLimitError,
 )
 from client.session_store import load_session, save_session, state_from_dict, state_to_dict
@@ -135,6 +134,46 @@ def test_corrupted_ciphertext_rejected() -> None:
     )
     with pytest.raises(DecryptionError):
         bob.ratchet_decrypt(tampered)
+
+
+def test_failed_decrypt_does_not_consume_in_order_message_key() -> None:
+    """A forged in-order packet must not advance receive state past the real message."""
+    alice, bob = _make_pair()
+    wire = alice.ratchet_encrypt(b"secret")
+    bad_ct = bytearray(wire.ciphertext)
+    bad_ct[0] ^= 0x01
+    tampered = RatchetWireMessage(
+        header=wire.header,
+        ciphertext=bytes(bad_ct),
+        nonce=wire.nonce,
+    )
+
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.ratchet_decrypt(wire) == b"secret"
+
+
+def test_failed_decrypt_does_not_consume_skipped_message_key() -> None:
+    """A forged skipped-key packet must not burn the stored key for the real message."""
+    alice, bob = _make_pair()
+    w0 = alice.ratchet_encrypt(b"m0")
+    w1 = alice.ratchet_encrypt(b"m1")
+    w2 = alice.ratchet_encrypt(b"m2")
+    assert bob.ratchet_decrypt(w2) == b"m2"
+
+    bad_ct = bytearray(w0.ciphertext)
+    bad_ct[0] ^= 0x01
+    tampered = RatchetWireMessage(
+        header=w0.header,
+        ciphertext=bytes(bad_ct),
+        nonce=w0.nonce,
+    )
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.ratchet_decrypt(w0) == b"m0"
+    assert bob.ratchet_decrypt(w1) == b"m1"
 
 
 def test_invalid_header_rejected() -> None:
