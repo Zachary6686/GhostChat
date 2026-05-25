@@ -36,7 +36,6 @@ from client.crypto.ratchet_errors import (
     DecryptionError,
     DuplicateMessageError,
     InvalidHeaderError,
-    SessionRollbackError,
     SkipDistanceExceededError,
     SkippedKeyStorageLimitError,
 )
