@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 
 from client.crypto.double_ratchet import (
     DoubleRatchetEngine,
+    MAX_SKIP_DISTANCE,
     ReceivedIdsStore,
     create_initial_state,
 )
@@ -36,9 +37,11 @@ from client.crypto.ratchet_errors import (
     DuplicateMessageError,
     InvalidHeaderError,
     SessionRollbackError,
+    SkipDistanceExceededError,
     SkippedKeyStorageLimitError,
 )
 from client.session_store import load_session, save_session, state_from_dict, state_to_dict
+from nacl.public import PrivateKey as X25519PrivateKey
 
 
 # --- Test helpers ---
@@ -277,6 +280,52 @@ def test_ciphertext_tampering_rejected() -> None:
     )
     with pytest.raises(DecryptionError):
         bob.ratchet_decrypt(tampered)
+
+
+def test_failed_decrypt_does_not_mutate_receive_state() -> None:
+    """AEAD failures must not consume counters or keys needed for the real message."""
+    alice, bob = _make_pair()
+    wire = alice.ratchet_encrypt(b"secret")
+    bad_ct = bytearray(wire.ciphertext)
+    bad_ct[0] ^= 0x01
+    tampered = RatchetWireMessage(
+        header=wire.header,
+        ciphertext=bytes(bad_ct),
+        nonce=wire.nonce,
+    )
+    before = state_to_dict(bob.state)
+
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert state_to_dict(bob.state) == before
+    assert bob.ratchet_decrypt(wire) == b"secret"
+
+
+def test_far_future_new_dh_rejection_does_not_mutate_state() -> None:
+    """Skip-distance rejection for a forged new-DH packet must leave the session usable."""
+    alice, bob = _make_pair()
+    alice_first = alice.ratchet_encrypt(b"alice first")
+    assert bob.ratchet_decrypt(alice_first) == b"alice first"
+    bob_first = bob.ratchet_encrypt(b"bob first")
+    assert alice.ratchet_decrypt(bob_first) == b"bob first"
+
+    before = state_to_dict(alice.state)
+    forged = RatchetWireMessage(
+        header=RatchetMessageHeader(
+            dh=bytes(X25519PrivateKey.generate().public_key),
+            n=MAX_SKIP_DISTANCE + 1,
+            pn=0,
+        ),
+        ciphertext=b"\x00" * 16,
+        nonce=b"\x00" * 12,
+    )
+    with pytest.raises(SkipDistanceExceededError):
+        alice.ratchet_decrypt(forged)
+
+    assert state_to_dict(alice.state) == before
+    bob_second = bob.ratchet_encrypt(b"bob second")
+    assert alice.ratchet_decrypt(bob_second) == b"bob second"
 
 
 def test_replay_after_serialization_roundtrip_rejected() -> None:
