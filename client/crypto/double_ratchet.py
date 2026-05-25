@@ -25,8 +25,9 @@ Key invariants (security-critical)
 from __future__ import annotations
 
 import base64
+import copy
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Dict, List, Optional, Tuple
 
 from cryptography.exceptions import InvalidTag
@@ -363,6 +364,14 @@ class DoubleRatchetEngine:
           6. Advance receiving chain to n (store skipped keys for Nr..n-1), derive mk for n, decrypt with AAD, add (dh,n) to received_ids, Nr = n+1.
         Postconditions: Message key used at most once; Nr increases; AAD tampering yields DecryptionError.
         """
+        live_state = self._state
+        trial = DoubleRatchetEngine(copy.deepcopy(live_state))
+        plaintext = trial._ratchet_decrypt_in_place(msg)
+        self._commit_state(live_state, trial.state)
+        return plaintext
+
+    def _ratchet_decrypt_in_place(self, msg: RatchetWireMessage) -> bytes:
+        """Decrypt against this engine's state. Callers must commit only after success."""
         state = self._state
         h = msg.header
         if len(h.dh) != DH_PUB_LEN:
@@ -437,6 +446,12 @@ class DoubleRatchetEngine:
             raise DecryptionError("AEAD verification failed") from e
         except Exception as e:
             raise DecryptionError("AEAD verification failed") from e
+
+    @staticmethod
+    def _commit_state(target: DoubleRatchetState, source: DoubleRatchetState) -> None:
+        """Copy a successfully authenticated trial state into the live state object."""
+        for item in fields(DoubleRatchetState):
+            setattr(target, item.name, copy.deepcopy(getattr(source, item.name)))
 
     def _skip_receiving_until(self, until: int) -> None:
         """
