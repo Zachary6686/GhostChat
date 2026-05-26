@@ -713,11 +713,17 @@ def test_session_version_persisted_and_incremented_on_save() -> None:
 
 
 def test_session_rollback_detected_on_save() -> None:
-    """If the session file was replaced with an older version (rollback), save raises SessionRollbackError."""
+    """A stale in-memory session cannot overwrite a newer session file."""
     alice, _ = _make_pair()
     with tempfile.TemporaryDirectory() as tmp:
         base = pathlib.Path(tmp)
         save_session("alice", "bob", alice.state, base_dir=base)
+        alice.state.session_version = 1
+        with pytest.raises(SessionRollbackError):
+            save_session("alice", "bob", alice.state, base_dir=base)
+        loaded = load_session("alice", "bob", base_dir=base)
+        assert loaded is not None
+        assert loaded.session_version == 2
 
 
 def test_save_session_does_not_silently_overwrite_corrupted_file() -> None:
