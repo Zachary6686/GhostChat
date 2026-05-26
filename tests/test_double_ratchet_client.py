@@ -36,6 +36,7 @@ from client.crypto.ratchet_errors import (
     DuplicateMessageError,
     InvalidHeaderError,
     SessionRollbackError,
+    SkipDistanceExceededError,
     SkippedKeyStorageLimitError,
 )
 from client.session_store import load_session, save_session, state_from_dict, state_to_dict
@@ -135,6 +136,7 @@ def test_corrupted_ciphertext_rejected() -> None:
     )
     with pytest.raises(DecryptionError):
         bob.ratchet_decrypt(tampered)
+    assert bob.ratchet_decrypt(wire) == b"secret"
 
 
 def test_invalid_header_rejected() -> None:
@@ -301,17 +303,44 @@ def test_skipped_key_deleted_after_use() -> None:
         bob.ratchet_decrypt(w0)
 
 
+def test_failed_skipped_key_decrypt_does_not_consume_key() -> None:
+    """Tampering with an out-of-order message must not delete its skipped key."""
+    alice, bob = _make_pair()
+    w0 = alice.ratchet_encrypt(b"m0")
+    w1 = alice.ratchet_encrypt(b"m1")
+    assert bob.ratchet_decrypt(w1) == b"m1"
+
+    bad_nonce = bytearray(w0.nonce)
+    bad_nonce[0] ^= 0x01
+    tampered = RatchetWireMessage(
+        header=w0.header,
+        ciphertext=w0.ciphertext,
+        nonce=bytes(bad_nonce),
+    )
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+    assert bob.ratchet_decrypt(w0) == b"m0"
+
+
 def test_skipped_keys_fifo_eviction_when_at_capacity() -> None:
-    """With FIFO eviction, receiving message 3 first evicts key for 0; receiving message 0 later is rejected as duplicate (n < Nr)."""
+    """Messages beyond skipped-key capacity are rejected without consuming receiver state."""
     max_keys = 2
     alice, bob = _make_pair(max_skipped_keys=max_keys)
     w0 = alice.ratchet_encrypt(b"m0")
-    alice.ratchet_encrypt(b"m1")
-    alice.ratchet_encrypt(b"m2")
-    w3 = alice.ratchet_encrypt(b"m3")
-    assert bob.ratchet_decrypt(w3) == b"m3"
-    with pytest.raises(DuplicateMessageError):
-        bob.ratchet_decrypt(w0)
+    w1 = alice.ratchet_encrypt(b"m1")
+    w2 = alice.ratchet_encrypt(b"m2")
+    assert bob.ratchet_decrypt(w2) == b"m2"
+    assert bob.ratchet_decrypt(w0) == b"m0"
+    assert bob.ratchet_decrypt(w1) == b"m1"
+
+    alice2, bob2 = _make_pair(max_skipped_keys=max_keys)
+    w0 = alice2.ratchet_encrypt(b"m0")
+    alice2.ratchet_encrypt(b"m1")
+    alice2.ratchet_encrypt(b"m2")
+    w3 = alice2.ratchet_encrypt(b"m3")
+    with pytest.raises(SkipDistanceExceededError):
+        bob2.ratchet_decrypt(w3)
+    assert bob2.ratchet_decrypt(w0) == b"m0"
 
 
 def test_persistence_restore_allows_continued_messaging() -> None:
@@ -443,6 +472,24 @@ def test_pn_updated_on_ratchet_turn() -> None:
     alice.ratchet_decrypt(reply)
     alice_next = alice.ratchet_encrypt(b"a4")
     assert alice_next.header.pn == 3  # Alice's previous sending chain had 3 messages
+
+
+def test_new_dh_ratchet_preserves_previous_chain_skipped_keys() -> None:
+    """When a new DH arrives, header.pn preserves missing messages from the old chain."""
+    alice, bob = _make_pair()
+    w0 = alice.ratchet_encrypt(b"a0")
+    w1 = alice.ratchet_encrypt(b"a1")
+    w2 = alice.ratchet_encrypt(b"a2")
+
+    assert bob.ratchet_decrypt(w0) == b"a0"
+    reply = bob.ratchet_encrypt(b"b0")
+    assert alice.ratchet_decrypt(reply) == b"b0"
+    w3 = alice.ratchet_encrypt(b"a3")
+    assert w3.header.pn == 3
+
+    assert bob.ratchet_decrypt(w3) == b"a3"
+    assert bob.ratchet_decrypt(w1) == b"a1"
+    assert bob.ratchet_decrypt(w2) == b"a2"
 
 
 def test_decrypt_stale_skipped_key_fails_as_duplicate() -> None:

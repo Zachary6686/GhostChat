@@ -25,6 +25,7 @@ Key invariants (security-critical)
 from __future__ import annotations
 
 import base64
+import copy
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -46,8 +47,9 @@ from client.crypto.symmetric import aead_decrypt, aead_encrypt
 # Wire / AEAD constants
 AAD_NONCE_LEN = 12
 DH_PUB_LEN = 32
-# Skip distance: max allowed gap (h.n - Nr). Reject larger gaps to bound CPU/memory (DoS).
-MAX_SKIP_DISTANCE = 5000
+# Skip distance: max allowed gap (h.n - Nr). Reject larger gaps to bound CPU/memory (DoS)
+# and to ensure every accepted skipped key can fit in the bounded skipped-key store.
+MAX_SKIP_DISTANCE = 1000
 
 
 def _dh(priv: X25519PrivateKey, pub: X25519PublicKey) -> bytes:
@@ -363,6 +365,13 @@ class DoubleRatchetEngine:
           6. Advance receiving chain to n (store skipped keys for Nr..n-1), derive mk for n, decrypt with AAD, add (dh,n) to received_ids, Nr = n+1.
         Postconditions: Message key used at most once; Nr increases; AAD tampering yields DecryptionError.
         """
+        trial_state = copy.deepcopy(self._state)
+        trial = DoubleRatchetEngine(trial_state)
+        plaintext = trial._ratchet_decrypt_in_place(msg)
+        self._commit_state(trial_state)
+        return plaintext
+
+    def _ratchet_decrypt_in_place(self, msg: RatchetWireMessage) -> bytes:
         state = self._state
         h = msg.header
         if len(h.dh) != DH_PUB_LEN:
@@ -412,7 +421,7 @@ class DoubleRatchetEngine:
             state.root_key = rk
             state.receiving_chain_key = ck_r
         if state.dhr is not None and h.dh != state.dhr:
-            self._skip_receiving_until(state.Nr)
+            self._skip_receiving_until(h.pn)
             self._dh_ratchet_receive(h.dh)
         if h.n < state.Nr:
             raise DuplicateMessageError("Message number already processed (replay)")
@@ -438,6 +447,24 @@ class DoubleRatchetEngine:
         except Exception as e:
             raise DecryptionError("AEAD verification failed") from e
 
+    def _commit_state(self, committed: DoubleRatchetState) -> None:
+        """Copy a successfully authenticated trial state back without replacing state identity."""
+        state = self._state
+        state.root_key = committed.root_key
+        state.sending_chain_key = committed.sending_chain_key
+        state.receiving_chain_key = committed.receiving_chain_key
+        state.dhs_private = committed.dhs_private
+        state.dhr = committed.dhr
+        state.Ns = committed.Ns
+        state.Nr = committed.Nr
+        state.PN = committed.PN
+        state.skipped_message_keys = committed.skipped_message_keys
+        state.received_ids = committed.received_ids
+        state.session_version = committed.session_version
+
+    def _max_skip_distance(self) -> int:
+        return min(MAX_SKIP_DISTANCE, self._state.skipped_message_keys.max_keys)
+
     def _skip_receiving_until(self, until: int) -> None:
         """
         Advance receiving chain from Nr to until; store message keys in skipped_message_keys.
@@ -449,6 +476,12 @@ class DoubleRatchetEngine:
             return
         if state.dhr is None:
             return
+        skip_distance = until - state.Nr
+        max_skip_distance = self._max_skip_distance()
+        if skip_distance > max_skip_distance:
+            raise SkipDistanceExceededError(
+                f"Skip distance {skip_distance} exceeds MAX_SKIP_DISTANCE={max_skip_distance}"
+            )
         while state.Nr < until:
             state.receiving_chain_key, mk = kdf_chain(state.receiving_chain_key)
             state.skipped_message_keys.add(state.dhr, state.Nr, mk)
