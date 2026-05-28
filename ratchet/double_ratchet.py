@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from nacl.public import PrivateKey as X25519PrivateKey, PublicKey as X25519PublicKey, Box
@@ -125,6 +125,44 @@ class DoubleRatchet:
     def decrypt(self, message: EncryptedMessage, ad: bytes = b"") -> bytes:
         """
         Decrypt a message, handling out-of-order delivery and skipped keys.
+        """
+        trial_state = self._clone_state()
+        trial = object.__new__(DoubleRatchet)
+        trial.state = trial_state
+        plaintext = trial._decrypt_in_place(message, ad)
+        self._commit_state(trial_state)
+        return plaintext
+
+    def _clone_state(self) -> RatchetState:
+        skipped_keys = SkippedKeyStore(max_keys=self.state.skipped_keys.max_keys)
+        skipped_keys._store = dict(self.state.skipped_keys._store)
+        return RatchetState(
+            root_key=self.state.root_key,
+            dhs=X25519PrivateKey(bytes(self.state.dhs)),
+            dhr=self.state.dhr,
+            ck_s=self.state.ck_s,
+            ck_r=self.state.ck_r,
+            Ns=self.state.Ns,
+            Nr=self.state.Nr,
+            PN=self.state.PN,
+            skipped_keys=skipped_keys,
+        )
+
+    def _commit_state(self, trial_state: RatchetState) -> None:
+        self.state.root_key = trial_state.root_key
+        self.state.dhs = trial_state.dhs
+        self.state.dhr = trial_state.dhr
+        self.state.ck_s = trial_state.ck_s
+        self.state.ck_r = trial_state.ck_r
+        self.state.Ns = trial_state.Ns
+        self.state.Nr = trial_state.Nr
+        self.state.PN = trial_state.PN
+        self.state.skipped_keys = trial_state.skipped_keys
+
+    def _decrypt_in_place(self, message: EncryptedMessage, ad: bytes = b"") -> bytes:
+        """
+        Mutating decrypt implementation. Callers must run it on trial state until
+        AEAD authentication succeeds.
         """
 
         h = message.header
