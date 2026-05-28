@@ -137,6 +137,64 @@ def test_corrupted_ciphertext_rejected() -> None:
         bob.ratchet_decrypt(tampered)
 
 
+def test_failed_decrypt_does_not_consume_current_chain_message() -> None:
+    """AEAD failure must not advance Nr/chain key before the valid message arrives."""
+    alice, bob = _make_pair()
+    wire = alice.ratchet_encrypt(b"secret")
+    tampered = RatchetWireMessage(
+        header=wire.header,
+        ciphertext=bytes(32),
+        nonce=wire.nonce,
+    )
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.state.Nr == 0
+    assert bob.ratchet_decrypt(wire) == b"secret"
+
+
+def test_failed_decrypt_does_not_consume_skipped_key() -> None:
+    """A forged out-of-order packet must not burn the stored skipped key."""
+    alice, bob = _make_pair()
+    w0 = alice.ratchet_encrypt(b"m0")
+    w1 = alice.ratchet_encrypt(b"m1")
+    assert bob.ratchet_decrypt(w1) == b"m1"
+
+    tampered = RatchetWireMessage(
+        header=w0.header,
+        ciphertext=bytes(32),
+        nonce=w0.nonce,
+    )
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.ratchet_decrypt(w0) == b"m0"
+
+
+def test_failed_new_dh_decrypt_does_not_desynchronize_session() -> None:
+    """A forged packet on a new DH ratchet must not commit the DH ratchet step."""
+    alice, bob = _make_pair()
+    w_a0 = alice.ratchet_encrypt(b"alice 0")
+    assert bob.ratchet_decrypt(w_a0) == b"alice 0"
+    w_b0 = bob.ratchet_encrypt(b"bob 0")
+    assert alice.ratchet_decrypt(w_b0) == b"bob 0"
+    w_a1 = alice.ratchet_encrypt(b"alice 1")
+
+    previous_dhr = bob.state.dhr
+    previous_nr = bob.state.Nr
+    tampered = RatchetWireMessage(
+        header=w_a1.header,
+        ciphertext=bytes(32),
+        nonce=w_a1.nonce,
+    )
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.state.dhr == previous_dhr
+    assert bob.state.Nr == previous_nr
+    assert bob.ratchet_decrypt(w_a1) == b"alice 1"
+
+
 def test_invalid_header_rejected() -> None:
     """wire_message_from_dict rejects missing or invalid header fields."""
     with pytest.raises(InvalidHeaderError):
