@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 import pathlib
 import sys
-from typing import List
+
+import pytest
+from cryptography.exceptions import InvalidTag
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -51,6 +53,22 @@ def test_out_of_order_delivery_and_skipped_keys() -> None:
 
     r2 = bob.decrypt(m2)
     assert r2 == b"m2"
+
+
+def test_failed_decrypt_does_not_consume_skipped_key() -> None:
+    alice, bob = _linked_sessions()
+
+    m1 = alice.encrypt(b"m1")
+    m2 = alice.encrypt(b"m2")
+    m3 = alice.encrypt(b"m3")
+    assert bob.decrypt(m3) == b"m3"
+
+    forged = EncryptedMessage(header=m1.header, ciphertext=bytes(32))
+    with pytest.raises(InvalidTag):
+        bob.decrypt(forged)
+
+    assert bob.decrypt(m1) == b"m1"
+    assert bob.decrypt(m2) == b"m2"
 
 
 def test_simultaneous_send_race_handling() -> None:

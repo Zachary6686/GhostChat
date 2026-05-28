@@ -25,6 +25,7 @@ Key invariants (security-critical)
 from __future__ import annotations
 
 import base64
+import copy
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -363,6 +364,27 @@ class DoubleRatchetEngine:
           6. Advance receiving chain to n (store skipped keys for Nr..n-1), derive mk for n, decrypt with AAD, add (dh,n) to received_ids, Nr = n+1.
         Postconditions: Message key used at most once; Nr increases; AAD tampering yields DecryptionError.
         """
+        trial_state = copy.deepcopy(self._state)
+        trial_engine = DoubleRatchetEngine(trial_state)
+        plaintext = trial_engine._ratchet_decrypt_in_place(msg)
+        self._commit_state(trial_state)
+        return plaintext
+
+    def _commit_state(self, trial_state: DoubleRatchetState) -> None:
+        """Commit authenticated trial-state mutations while preserving state object identity."""
+        self._state.root_key = trial_state.root_key
+        self._state.sending_chain_key = trial_state.sending_chain_key
+        self._state.receiving_chain_key = trial_state.receiving_chain_key
+        self._state.dhs_private = trial_state.dhs_private
+        self._state.dhr = trial_state.dhr
+        self._state.Ns = trial_state.Ns
+        self._state.Nr = trial_state.Nr
+        self._state.PN = trial_state.PN
+        self._state.skipped_message_keys = trial_state.skipped_message_keys
+        self._state.received_ids = trial_state.received_ids
+        self._state.session_version = trial_state.session_version
+
+    def _ratchet_decrypt_in_place(self, msg: RatchetWireMessage) -> bytes:
         state = self._state
         h = msg.header
         if len(h.dh) != DH_PUB_LEN:
