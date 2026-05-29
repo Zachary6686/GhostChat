@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -306,6 +307,21 @@ class DoubleRatchetState:
         return bytes(X25519PrivateKey(self.dhs_private).public_key)
 
 
+def _commit_state_fields(live: DoubleRatchetState, trial: DoubleRatchetState) -> None:
+    """Copy a successfully authenticated trial receive state back in place."""
+    live.root_key = trial.root_key
+    live.sending_chain_key = trial.sending_chain_key
+    live.receiving_chain_key = trial.receiving_chain_key
+    live.dhs_private = trial.dhs_private
+    live.dhr = trial.dhr
+    live.Ns = trial.Ns
+    live.Nr = trial.Nr
+    live.PN = trial.PN
+    live.skipped_message_keys = trial.skipped_message_keys
+    live.received_ids = trial.received_ids
+    live.session_version = trial.session_version
+
+
 class DoubleRatchetEngine:
     """
     Double Ratchet encrypt/decrypt with DH ratchet steps and skipped keys.
@@ -350,6 +366,13 @@ class DoubleRatchetEngine:
         return RatchetWireMessage(header=header, ciphertext=ciphertext, nonce=nonce)
 
     def ratchet_decrypt(self, msg: RatchetWireMessage) -> bytes:
+        live_state = self._state
+        trial_state = deepcopy(live_state)
+        plaintext = DoubleRatchetEngine(trial_state)._ratchet_decrypt_mutating(msg)
+        _commit_state_fields(live_state, trial_state)
+        return plaintext
+
+    def _ratchet_decrypt_mutating(self, msg: RatchetWireMessage) -> bytes:
         """
         Decrypt (receive). Spec: 3.2 (same DH) and 3.3 (new DH ratchet).
 

@@ -25,10 +25,9 @@ class SessionReplayCache:
     def _make_key(self, env: ProtocolEnvelope) -> CacheKey:
         return (env.session_id, env.sender_ratchet_key, env.message_number)
 
-    def accept(self, env: ProtocolEnvelope) -> bool:
+    def check(self, env: ProtocolEnvelope) -> bool:
         """
-        Return True if this envelope is accepted as fresh; False if it
-        should be treated as a replay or stale.
+        Return True if this envelope appears fresh without mutating state.
         """
 
         key = self._make_key(env)
@@ -46,8 +45,25 @@ class SessionReplayCache:
         if len(self.seen) >= self.max_entries:
             return False
 
+        return True
+
+    def mark(self, env: ProtocolEnvelope) -> bool:
+        """
+        Mark an authenticated envelope as accepted.
+        """
+        if not self.check(env):
+            return False
+        key = self._make_key(env)
+        last = self.highest_by_ratchet.get(env.sender_ratchet_key)
         self.seen.add(key)
         if last is None or env.message_number > last:
             self.highest_by_ratchet[env.sender_ratchet_key] = env.message_number
         return True
+
+    def accept(self, env: ProtocolEnvelope) -> bool:
+        """
+        Return True if this envelope is accepted as fresh; False if it
+        should be treated as a replay or stale.
+        """
+        return self.mark(env)
 

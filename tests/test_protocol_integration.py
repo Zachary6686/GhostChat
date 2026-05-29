@@ -4,6 +4,9 @@ import os
 import pathlib
 import sys
 
+import pytest
+from cryptography.exceptions import InvalidTag
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -59,6 +62,21 @@ def _linked_managers() -> tuple[SessionManager, SessionManager, bytes, bytes]:
     return alice_mgr, bob_mgr, peer_id, root_key
 
 
+def _tamper_envelope_ciphertext(env: ProtocolEnvelope) -> ProtocolEnvelope:
+    ciphertext = bytearray(env.ciphertext)
+    ciphertext[0] ^= 0x01
+    return ProtocolEnvelope(
+        version=env.version,
+        session_id=env.session_id,
+        sender_ratchet_key=env.sender_ratchet_key,
+        message_number=env.message_number,
+        previous_chain_length=env.previous_chain_length,
+        ciphertext=bytes(ciphertext),
+        nonce=env.nonce,
+        meta=dict(env.meta),
+    )
+
+
 def test_protocol_integration_end_to_end() -> None:
     alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
     register_endpoint("alice", alice_mgr)
@@ -67,6 +85,31 @@ def test_protocol_integration_end_to_end() -> None:
     send_text("alice", "bob", peer_id, "hello bob")
     msgs = recv_text("bob", peer_id)
     assert msgs == ["hello bob"]
+
+
+def test_tampered_envelope_does_not_poison_replay_or_ratchet_state() -> None:
+    alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
+
+    env = alice_mgr.encrypt_for(peer_id, b"real")
+    with pytest.raises(InvalidTag):
+        bob_mgr.decrypt_from(peer_id, _tamper_envelope_ciphertext(env))
+
+    assert bob_mgr.decrypt_from(peer_id, env) == b"real"
+
+
+def test_protocol_allows_new_ratchet_key_message_number_reset() -> None:
+    alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
+
+    for i in range(3):
+        env = alice_mgr.encrypt_for(peer_id, f"before-{i}".encode("ascii"))
+        assert bob_mgr.decrypt_from(peer_id, env) == f"before-{i}".encode("ascii")
+
+    reply = bob_mgr.encrypt_for(peer_id, b"reply")
+    assert alice_mgr.decrypt_from(peer_id, reply) == b"reply"
+
+    reset_env = alice_mgr.encrypt_for(peer_id, b"after-reset")
+    assert reset_env.message_number == 0
+    assert bob_mgr.decrypt_from(peer_id, reset_env) == b"after-reset"
 
 
 def test_protocol_integration_replay_triggers_reset() -> None:

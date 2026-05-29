@@ -45,6 +45,35 @@ class EncryptedMessage:
     ciphertext: bytes
 
 
+def _clone_state(state: RatchetState) -> RatchetState:
+    skipped_keys = SkippedKeyStore(max_keys=state.skipped_keys.max_keys)
+    skipped_keys._store = dict(state.skipped_keys._store)
+    return RatchetState(
+        root_key=state.root_key,
+        dhs=state.dhs,
+        dhr=state.dhr,
+        ck_s=state.ck_s,
+        ck_r=state.ck_r,
+        Ns=state.Ns,
+        Nr=state.Nr,
+        PN=state.PN,
+        skipped_keys=skipped_keys,
+    )
+
+
+def _commit_state_fields(live: RatchetState, trial: RatchetState) -> None:
+    """Copy a successfully authenticated trial receive state back in place."""
+    live.root_key = trial.root_key
+    live.dhs = trial.dhs
+    live.dhr = trial.dhr
+    live.ck_s = trial.ck_s
+    live.ck_r = trial.ck_r
+    live.Ns = trial.Ns
+    live.Nr = trial.Nr
+    live.PN = trial.PN
+    live.skipped_keys = trial.skipped_keys
+
+
 class DoubleRatchet:
     """
     Double Ratchet engine implementing:
@@ -123,6 +152,14 @@ class DoubleRatchet:
         return EncryptedMessage(header=header, ciphertext=ciphertext)
 
     def decrypt(self, message: EncryptedMessage, ad: bytes = b"") -> bytes:
+        live_state = self.state
+        trial = object.__new__(DoubleRatchet)
+        trial.state = _clone_state(live_state)
+        plaintext = trial._decrypt_mutating(message, ad)
+        _commit_state_fields(live_state, trial.state)
+        return plaintext
+
+    def _decrypt_mutating(self, message: EncryptedMessage, ad: bytes = b"") -> bytes:
         """
         Decrypt a message, handling out-of-order delivery and skipped keys.
         """

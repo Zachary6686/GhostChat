@@ -61,6 +61,14 @@ def _b64(s: str) -> bytes:
     return base64.urlsafe_b64decode((s + pad).encode("ascii"))
 
 
+def _tamper_ciphertext(wire: RatchetWireMessage) -> RatchetWireMessage:
+    tampered = wire_message_from_dict(wire_message_to_dict(wire))
+    ct = bytearray(tampered.ciphertext)
+    ct[0] ^= 0x01
+    tampered.ciphertext = bytes(ct)
+    return tampered
+
+
 # --- Core functionality ---
 
 
@@ -121,6 +129,34 @@ def test_duplicate_message_rejected() -> None:
     bob.ratchet_decrypt(w)
     with pytest.raises(DuplicateMessageError):
         bob.ratchet_decrypt(w)
+
+
+def test_failed_current_chain_decrypt_does_not_consume_message_key() -> None:
+    """A forged packet must not advance receive counters past the real packet."""
+    alice, bob = _make_pair()
+    wire = alice.ratchet_encrypt(b"real")
+    state_obj = bob.state
+
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(_tamper_ciphertext(wire))
+
+    assert bob.state is state_obj
+    assert bob.ratchet_decrypt(wire) == b"real"
+
+
+def test_failed_skipped_key_decrypt_does_not_drop_key() -> None:
+    """A forged out-of-order packet must not consume the cached skipped key."""
+    alice, bob = _make_pair()
+    w0 = alice.ratchet_encrypt(b"m0")
+    w1 = alice.ratchet_encrypt(b"m1")
+    w2 = alice.ratchet_encrypt(b"m2")
+
+    assert bob.ratchet_decrypt(w2) == b"m2"
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(_tamper_ciphertext(w0))
+
+    assert bob.ratchet_decrypt(w0) == b"m0"
+    assert bob.ratchet_decrypt(w1) == b"m1"
 
 
 def test_corrupted_ciphertext_rejected() -> None:
