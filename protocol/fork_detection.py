@@ -29,16 +29,18 @@ def detect_fork(
     ratchet_pub: bytes,
     msg_num: int,
     prev_chain_len: int,
+    *,
+    commit: bool = True,
 ) -> bool:
     """
     Return True if an impossible regression or conflict is detected.
 
     Suspicious conditions:
-      - message number regresses.
-      - ratchet key changes but message number regresses relative to the
-        previous key.
-      - previous_chain_length regresses in a way that contradicts the
-        observed progression.
+      - message number regresses under the same ratchet key.
+      - previous_chain_length regresses under the same ratchet key.
+
+    Message numbers are scoped to a ratchet key, so a new ratchet key may
+    legitimately reset the message number to zero.
     """
 
     # Regression of message number under same ratchet key.
@@ -46,17 +48,17 @@ def detect_fork(
         if msg_num < state.last_message_number:
             return True
 
-    # Ratchet key change with apparent regression.
-    if state.last_ratchet_pub is not None and ratchet_pub != state.last_ratchet_pub:
-        if msg_num < state.last_message_number:
-            return True
-
-    # Previous-chain-length going backwards is suspicious.
-    if prev_chain_len < state.last_previous_chain_length:
+    # Previous-chain-length going backwards under the same key is suspicious.
+    if (
+        state.last_ratchet_pub is not None
+        and ratchet_pub == state.last_ratchet_pub
+        and prev_chain_len < state.last_previous_chain_length
+    ):
         return True
 
-    state.last_message_number = msg_num
-    state.last_previous_chain_length = prev_chain_len
-    state.last_ratchet_pub = ratchet_pub
+    if commit:
+        state.last_message_number = msg_num
+        state.last_previous_chain_length = prev_chain_len
+        state.last_ratchet_pub = ratchet_pub
     return False
 

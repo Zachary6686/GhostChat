@@ -4,6 +4,8 @@ import os
 import pathlib
 import sys
 
+from cryptography.exceptions import InvalidTag
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -12,19 +14,16 @@ from client.message_api import (
     register_endpoint,
     send_group_text,
     recv_group_text,
-    _endpoints,
 )
 from client.group_manager import GroupManager
 from client.session_manager import SessionManager
 from group.membership import MembershipController
-from group.group_messaging import GroupMessenger
+from group.group_messaging import GroupMessage, GroupMessenger
 from group.errors import EpochMismatchError, ReplayedGroupMessageError
 from group.state_verification import (
-    validate_local_state,
     validate_serialized,
     validate_incoming_state,
     summarize_state,
-    ValidationResult,
 )
 
 
@@ -167,6 +166,31 @@ def test_duplicate_replayed_group_message_rejected() -> None:
         assert False, "Replay should be rejected"
     except ReplayedGroupMessageError:
         pass
+
+
+def test_failed_group_decrypt_does_not_poison_replay_cache() -> None:
+    """Forged group ciphertext with a real counter must not block the real message."""
+    gid = _rand_id()
+    a, b = os.urandom(32), os.urandom(32)
+    controller = MembershipController.create_group(gid, [a, b])
+    state = controller.state
+    leaf_a = state.members[a].leaf_index
+    leaf_b = state.members[b].leaf_index
+
+    sender = GroupMessenger(state, sender_leaf_index=leaf_a)
+    receiver = GroupMessenger(state, sender_leaf_index=leaf_b)
+    msg = sender.encrypt(b"real")
+    tampered_ct = bytearray(msg.ciphertext)
+    tampered_ct[0] ^= 0x01
+    tampered = GroupMessage(header=msg.header, ciphertext=bytes(tampered_ct))
+
+    try:
+        receiver.decrypt(tampered)
+        assert False, "Tampered message should fail authentication"
+    except InvalidTag:
+        pass
+
+    assert receiver.decrypt(msg) == b"real"
 
 
 def test_malformed_serialized_group_state_rejected() -> None:

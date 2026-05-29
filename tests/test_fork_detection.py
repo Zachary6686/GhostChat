@@ -30,3 +30,9 @@ def test_fork_on_prev_chain_len_regression() -> None:
     # Previous chain length decreasing is suspicious.
     assert detect_fork(state, b"rk1", 1, 3)
 
+
+def test_no_fork_on_new_ratchet_counter_reset() -> None:
+    state = ForkDetectionState()
+    assert not detect_fork(state, b"rk1", 5, 0)
+    assert not detect_fork(state, b"rk2", 0, 6)
+
