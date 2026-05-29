@@ -8,7 +8,7 @@ key, and message number. It is deterministic and testable.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, Hashable, Set, Tuple
+from typing import Dict, Set, Tuple
 
 from .envelope import ProtocolEnvelope
 

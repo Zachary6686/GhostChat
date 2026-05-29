@@ -14,7 +14,6 @@ from client.message_api import (
     register_endpoint,
     send_group_text,
     recv_group_text,
-    _endpoints,
 )
 from client.group_manager import GroupManager
 from client.session_manager import SessionManager
@@ -22,11 +21,9 @@ from group.membership import MembershipController
 from group.group_messaging import GroupMessage, GroupMessenger
 from group.errors import EpochMismatchError, ReplayedGroupMessageError
 from group.state_verification import (
-    validate_local_state,
     validate_serialized,
     validate_incoming_state,
     summarize_state,
-    ValidationResult,
 )
 
 
