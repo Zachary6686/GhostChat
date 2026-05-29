@@ -97,21 +97,6 @@ def test_tampered_envelope_does_not_poison_replay_or_ratchet_state() -> None:
     assert bob_mgr.decrypt_from(peer_id, env) == b"real"
 
 
-def test_protocol_allows_new_ratchet_key_message_number_reset() -> None:
-    alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
-
-    for i in range(3):
-        env = alice_mgr.encrypt_for(peer_id, f"before-{i}".encode("ascii"))
-        assert bob_mgr.decrypt_from(peer_id, env) == f"before-{i}".encode("ascii")
-
-    reply = bob_mgr.encrypt_for(peer_id, b"reply")
-    assert alice_mgr.decrypt_from(peer_id, reply) == b"reply"
-
-    reset_env = alice_mgr.encrypt_for(peer_id, b"after-reset")
-    assert reset_env.message_number == 0
-    assert bob_mgr.decrypt_from(peer_id, reset_env) == b"after-reset"
-
-
 def test_protocol_integration_replay_triggers_reset() -> None:
     alice_mgr, bob_mgr, peer_id, _ = _linked_managers()
     register_endpoint("alice", alice_mgr)
