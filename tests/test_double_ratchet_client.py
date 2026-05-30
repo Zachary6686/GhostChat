@@ -135,6 +135,44 @@ def test_corrupted_ciphertext_rejected() -> None:
     )
     with pytest.raises(DecryptionError):
         bob.ratchet_decrypt(tampered)
+    assert bob.ratchet_decrypt(wire) == b"secret"
+
+
+def test_failed_decrypt_does_not_consume_current_chain_state() -> None:
+    """Forged in-order packets must not advance Nr or burn the real message key."""
+    alice, bob = _make_pair()
+    wire = alice.ratchet_encrypt(b"first")
+    tampered = RatchetWireMessage(
+        header=wire.header,
+        ciphertext=bytes(wire.ciphertext),
+        nonce=wire.nonce,
+    )
+
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.state.Nr == 0
+    assert bob.ratchet_decrypt(wire) == b"first"
+
+
+def test_failed_decrypt_does_not_consume_skipped_key() -> None:
+    """Forged out-of-order packets must not delete a skipped key before auth."""
+    alice, bob = _make_pair()
+    w0 = alice.ratchet_encrypt(b"m0")
+    w1 = alice.ratchet_encrypt(b"m1")
+    w2 = alice.ratchet_encrypt(b"m2")
+    assert bob.ratchet_decrypt(w2) == b"m2"
+
+    tampered = RatchetWireMessage(
+        header=w0.header,
+        ciphertext=bytes(w0.ciphertext),
+        nonce=w0.nonce,
+    )
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.ratchet_decrypt(w0) == b"m0"
+    assert bob.ratchet_decrypt(w1) == b"m1"
 
 
 def test_invalid_header_rejected() -> None:
