@@ -61,6 +61,11 @@ def _b64(s: str) -> bytes:
     return base64.urlsafe_b64decode((s + pad).encode("ascii"))
 
 
+def _tamper_ciphertext(ciphertext: bytes) -> bytes:
+    assert ciphertext
+    return bytes([ciphertext[0] ^ 0x01]) + ciphertext[1:]
+
+
 # --- Core functionality ---
 
 
@@ -130,7 +135,7 @@ def test_corrupted_ciphertext_rejected() -> None:
     assert len(wire.ciphertext) > 0, "Ciphertext must be non-empty to mutate"
     tampered = RatchetWireMessage(
         header=wire.header,
-        ciphertext=bytes(32),
+        ciphertext=_tamper_ciphertext(wire.ciphertext),
         nonce=wire.nonce,
     )
     with pytest.raises(DecryptionError):
@@ -144,7 +149,7 @@ def test_failed_decrypt_does_not_consume_current_chain_state() -> None:
     wire = alice.ratchet_encrypt(b"first")
     tampered = RatchetWireMessage(
         header=wire.header,
-        ciphertext=bytes(wire.ciphertext),
+        ciphertext=_tamper_ciphertext(wire.ciphertext),
         nonce=wire.nonce,
     )
 
@@ -165,7 +170,7 @@ def test_failed_decrypt_does_not_consume_skipped_key() -> None:
 
     tampered = RatchetWireMessage(
         header=w0.header,
-        ciphertext=bytes(w0.ciphertext),
+        ciphertext=_tamper_ciphertext(w0.ciphertext),
         nonce=w0.nonce,
     )
     with pytest.raises(DecryptionError):
