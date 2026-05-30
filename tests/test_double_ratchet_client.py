@@ -35,7 +35,6 @@ from client.crypto.ratchet_errors import (
     DecryptionError,
     DuplicateMessageError,
     InvalidHeaderError,
-    SessionRollbackError,
     SkippedKeyStorageLimitError,
 )
 from client.session_store import load_session, save_session, state_from_dict, state_to_dict
@@ -59,6 +58,11 @@ def _make_pair(max_skipped_keys: int = 1000) -> tuple[DoubleRatchetEngine, Doubl
 def _b64(s: str) -> bytes:
     pad = "=" * (-len(s) % 4)
     return base64.urlsafe_b64decode((s + pad).encode("ascii"))
+
+
+def _tamper_ciphertext(ciphertext: bytes) -> bytes:
+    assert ciphertext
+    return bytes([ciphertext[0] ^ 0x01]) + ciphertext[1:]
 
 
 # --- Core functionality ---
@@ -130,11 +134,49 @@ def test_corrupted_ciphertext_rejected() -> None:
     assert len(wire.ciphertext) > 0, "Ciphertext must be non-empty to mutate"
     tampered = RatchetWireMessage(
         header=wire.header,
-        ciphertext=bytes(32),
+        ciphertext=_tamper_ciphertext(wire.ciphertext),
         nonce=wire.nonce,
     )
     with pytest.raises(DecryptionError):
         bob.ratchet_decrypt(tampered)
+    assert bob.ratchet_decrypt(wire) == b"secret"
+
+
+def test_failed_decrypt_does_not_consume_current_chain_state() -> None:
+    """Forged in-order packets must not advance Nr or burn the real message key."""
+    alice, bob = _make_pair()
+    wire = alice.ratchet_encrypt(b"first")
+    tampered = RatchetWireMessage(
+        header=wire.header,
+        ciphertext=_tamper_ciphertext(wire.ciphertext),
+        nonce=wire.nonce,
+    )
+
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.state.Nr == 0
+    assert bob.ratchet_decrypt(wire) == b"first"
+
+
+def test_failed_decrypt_does_not_consume_skipped_key() -> None:
+    """Forged out-of-order packets must not delete a skipped key before auth."""
+    alice, bob = _make_pair()
+    w0 = alice.ratchet_encrypt(b"m0")
+    w1 = alice.ratchet_encrypt(b"m1")
+    w2 = alice.ratchet_encrypt(b"m2")
+    assert bob.ratchet_decrypt(w2) == b"m2"
+
+    tampered = RatchetWireMessage(
+        header=w0.header,
+        ciphertext=_tamper_ciphertext(w0.ciphertext),
+        nonce=w0.nonce,
+    )
+    with pytest.raises(DecryptionError):
+        bob.ratchet_decrypt(tampered)
+
+    assert bob.ratchet_decrypt(w0) == b"m0"
+    assert bob.ratchet_decrypt(w1) == b"m1"
 
 
 def test_invalid_header_rejected() -> None:

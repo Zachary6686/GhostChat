@@ -25,8 +25,9 @@ Key invariants (security-critical)
 from __future__ import annotations
 
 import base64
+import copy
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Dict, List, Optional, Tuple
 
 from cryptography.exceptions import InvalidTag
@@ -363,6 +364,18 @@ class DoubleRatchetEngine:
           6. Advance receiving chain to n (store skipped keys for Nr..n-1), derive mk for n, decrypt with AAD, add (dh,n) to received_ids, Nr = n+1.
         Postconditions: Message key used at most once; Nr increases; AAD tampering yields DecryptionError.
         """
+        trial_state = copy.deepcopy(self._state)
+        trial_engine = DoubleRatchetEngine(trial_state)
+        plaintext = trial_engine._ratchet_decrypt_in_place(msg)
+        self._commit_state(trial_state)
+        return plaintext
+
+    def _commit_state(self, new_state: DoubleRatchetState) -> None:
+        """Preserve state object identity while committing an authenticated receive."""
+        for state_field in fields(DoubleRatchetState):
+            setattr(self._state, state_field.name, getattr(new_state, state_field.name))
+
+    def _ratchet_decrypt_in_place(self, msg: RatchetWireMessage) -> bytes:
         state = self._state
         h = msg.header
         if len(h.dh) != DH_PUB_LEN:
